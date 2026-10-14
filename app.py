@@ -3,6 +3,7 @@ import pandas as pd
 import streamlit as st
 
 from html import escape
+from pathlib import Path
 from io import BytesIO
 
 import history
@@ -42,6 +43,59 @@ st.session_state.setdefault("page", PAGES[0])
 def go_to(name):
     """이전/다음 버튼을 누르면 사이드바 메뉴와 같은 값(page)을 바꿔서 화면을 이동한다."""
     st.session_state["page"] = name
+
+
+SAMPLE_DIR = Path(__file__).parent / "sample_data"   # 샘플(가상) 데이터 폴더
+SAMPLE_LABEL = " (가상 데이터)"
+
+
+def reset_edits():
+    """새 신규 특약 파일이 들어오면 ②의 수정 내용을 초기화한다."""
+    for key in ["edit_base", "edit_sig", "edit_orig", "editor"]:
+        st.session_state.pop(key, None)
+
+
+def load_sample_master():
+    """샘플 기준표를 업로드한 것과 똑같이 불러온다 (학습은 '학습하기' 버튼)."""
+    st.session_state.update(pending_master=read_master(SAMPLE_DIR / "coverage_master.xlsx"),
+                            pending_name="샘플 coverage_master.xlsx" + SAMPLE_LABEL, pending_id="sample")
+    st.session_state.pop("train_msg", None)
+
+
+def load_sample_new():
+    """샘플 신규 특약을 업로드한 것과 똑같이 불러온다."""
+    st.session_state.update(new_df=pd.read_excel(SAMPLE_DIR / "new_coverage.xlsx", dtype=str),
+                            new_file_id="sample", new_file_name="샘플 new_coverage.xlsx" + SAMPLE_LABEL)
+    reset_edits()
+
+
+def load_sample_answer():
+    st.session_state["answer_df"] = pd.read_excel(SAMPLE_DIR / "answer_key.xlsx", dtype=str)
+
+
+def load_sample_perf():
+    st.session_state["perf_df"] = pd.read_excel(SAMPLE_DIR / "coverage_perf.xlsx", dtype={"기준월": str, "담보코드": str})
+    st.session_state["perf_name"] = "샘플 coverage_perf.xlsx" + SAMPLE_LABEL
+
+
+def quick_start():
+    """샘플 기준표 학습 + 샘플 신규 특약 준비를 한 번에 하고 ② 화면으로 이동한다."""
+    load_sample_master()
+    master = st.session_state["pending_master"]
+    models, checked = train(master)
+    n = int((checked["상태"] == "정상").sum())
+    st.session_state.update(master=master, models=models, checked=checked,
+                            train_msg=f"학습 완료! ({n}건으로 학습했습니다)")
+    load_sample_new()
+    st.session_state["quick_msg"] = (f"샘플 기준표로 학습했고({n}건) 샘플 신규 특약 "
+                                     f"{len(st.session_state['new_df'])}건을 불러왔습니다. 아래에서 결과를 확인하세요.")
+    go_to(PAGES[1])
+
+
+def sample_or():
+    """업로드 칸 아래의 '또는' 줄."""
+    st.markdown("<div style='text-align:center; color:gray; font-size:13px; margin:2px 0'>— 또는 —</div>",
+                unsafe_allow_html=True)
 
 
 def nav_buttons():
@@ -189,7 +243,13 @@ if page == "① 기준표 업로드·학습":
     if st.session_state.get("old_history"):
         st.warning(f"이력 폴더의 최근 버전({st.session_state['old_history']})은 예전 열 구성이라 자동으로 불러오지 않았습니다. "
                    "아래에서 새 기준표를 업로드하세요.")
+    st.button("샘플로 한 번에 시작" + SAMPLE_LABEL, on_click=quick_start, type="primary", key="quick_start_1",
+              help="샘플 기준표 학습 + 샘플 신규 특약 준비를 한 번에 하고 ② 화면으로 이동합니다.")
+    st.caption("엑셀 파일이 없어도 체험할 수 있습니다. 샘플 기준표로 학습하고 샘플 신규 특약까지 준비한 뒤 ②로 이동합니다.")
     file = st.file_uploader("기준표 엑셀 (coverage_master.xlsx, 첫 번째 시트 사용)", type="xlsx")
+    sample_or()
+    st.button("샘플 기준표 불러오기" + SAMPLE_LABEL, on_click=load_sample_master, key="sample_master",
+              help="저장소의 sample_data/coverage_master.xlsx를 불러옵니다. 올려 둔 기준표는 샘플로 바뀝니다.")
     if file and st.session_state.get("pending_id") != file.file_id:
         master = read_master(file)
         lack = missing_columns(master, MASTER_COLS)
@@ -203,6 +263,8 @@ if page == "① 기준표 업로드·학습":
     master = st.session_state.get("pending_master")
     if master is not None:
         st.caption(f"업로드한 기준표: {st.session_state['pending_name']} (화면을 옮겨도 유지됩니다)")
+        if st.session_state.get("pending_id") == "sample" and not st.session_state.get("train_msg"):
+            st.info("샘플 기준표를 불러왔습니다. 아래 검사 결과를 확인하고 '학습하기'를 누르세요.")
         # 학습 전에 검사만 먼저 해서 건수를 보여준다
         checked = check_master(master)
         counts = checked["상태"].value_counts()
@@ -231,8 +293,11 @@ if page == "① 기준표 업로드·학습":
 # ---------- ② 신규 특약 분류 ----------
 elif page == "② 분류·수정·승인":
     st.header("② 분류·수정·승인")
+    if st.session_state.get("quick_msg"):
+        st.success(st.session_state.pop("quick_msg"))
     if st.session_state["models"] is None:
         st.warning("먼저 ① 화면에서 기준표를 올리고 학습해 주세요.")
+        st.button("샘플로 한 번에 시작" + SAMPLE_LABEL, on_click=quick_start, type="primary", key="quick_start_2")
         finish()
 
     file = st.file_uploader(f"신규 특약 엑셀 ({', '.join(INPUT_COLS)})", type="xlsx")
@@ -245,8 +310,10 @@ elif page == "② 분류·수정·승인":
         st.session_state["new_df"] = new_df
         st.session_state["new_file_id"] = file.file_id
         st.session_state["new_file_name"] = file.name
-        for key in ["edit_base", "edit_sig", "edit_orig", "editor"]:   # 새 파일이면 수정 내용 초기화
-            st.session_state.pop(key, None)
+        reset_edits()   # 새 파일이면 수정 내용 초기화
+    sample_or()
+    st.button("샘플 신규 특약 불러오기" + SAMPLE_LABEL, on_click=load_sample_new, key="sample_new",
+              help="저장소의 sample_data/new_coverage.xlsx를 불러옵니다. 올려 둔 파일과 수정 내용은 초기화됩니다.")
     if st.session_state["new_df"] is not None:
         st.caption(f"업로드한 신규 특약: {st.session_state.get('new_file_name', '')} (화면을 옮겨도 유지됩니다)")
     c1, c2 = st.columns(2)
@@ -405,8 +472,9 @@ elif page == "② 분류·수정·승인":
         if len(diff):
             st.error(f"동일 특약명인데 예측이 기준표의 기존 분류와 다릅니다. 꼭 확인하세요: {', '.join(diff['특약코드'])}")
 
-        with st.expander("정확도 확인 (정답지가 있을 때만)"):
+        with st.expander("정확도 확인 (정답지가 있을 때만)", expanded=st.session_state.get("answer_df") is not None):
             key_file = st.file_uploader("정답지 엑셀 (answer_key.xlsx)", type="xlsx", key="answer")
+            st.button("샘플 정답지 불러오기" + SAMPLE_LABEL, on_click=load_sample_answer, key="sample_answer")
             if key_file:
                 st.session_state["answer_df"] = pd.read_excel(key_file, dtype=str)
             if st.session_state.get("answer_df") is not None:
@@ -505,13 +573,19 @@ else:
     st.header("④ 손해율 집계 (선택)")
     if st.session_state["master"] is None:
         st.warning("먼저 ① 화면에서 기준표를 올리고 학습해 주세요.")
+        st.button("샘플로 한 번에 시작" + SAMPLE_LABEL, on_click=quick_start, type="primary", key="quick_start_4")
         finish()
 
     file = st.file_uploader("담보별 실적 엑셀 (coverage_perf.xlsx)", type="xlsx")
+    sample_or()
+    st.button("샘플 실적 불러오기" + SAMPLE_LABEL, on_click=load_sample_perf, key="sample_perf",
+              help="저장소의 sample_data/coverage_perf.xlsx를 불러옵니다.")
     if file:
         st.session_state["perf_df"] = pd.read_excel(file, dtype={"기준월": str, "담보코드": str})
+        st.session_state["perf_name"] = file.name
     if st.session_state.get("perf_df") is not None:
         perf = st.session_state["perf_df"]
+        st.caption(f"실적 파일: {st.session_state.get('perf_name', '')}")
         # 기준표 분류를 바탕으로, ②에서 수정한 신규 특약 분류가 있으면 그것을 우선한다
         table = st.session_state["master"][["담보코드", "대분류"]]
         edited = st.session_state.get("edited")
