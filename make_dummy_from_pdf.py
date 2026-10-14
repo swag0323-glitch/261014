@@ -1,7 +1,7 @@
 """상품요약서 PDF의 (선택특약) 이름으로 더미 엑셀 4종을 만든다.
 특약명만 PDF에서 가져오고, 나머지 열(담보·분류·실적 등)은 아래 규칙으로 임의로 만든 가상 값이다.
-사용법: python make_dummy_from_pdf.py 상품요약서.pdf 8 16 private_data
-        (먼저 한 번만: pip install pypdf)  ※ 결과 폴더는 .gitignore에 있어 깃에 올라가지 않는다.
+사용법: python make_dummy_from_pdf.py 상품요약서.pdf 8 16 sample_data
+        (먼저 한 번만: pip install pypdf)  ※ 특약명은 공개 자료라 결과 폴더를 깃에 올려도 된다.
 """
 import re
 import sys
