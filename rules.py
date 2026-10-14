@@ -16,6 +16,22 @@ def clean_name(name):
     return s.replace("진단금", "진단비")
 
 
+def bigrams(text):
+    """글자 두 개씩 묶은 조각 (유사도 계산용)."""
+    return {text[i:i + 2] for i in range(len(text) - 1)}
+
+
+def name_similarity(name, known):
+    """신규 담보명의 글자 조각 중 기준표에도 있던 비율 (0~1). 낮을수록 기준표에 없던 새 표현이다."""
+    pieces = bigrams(clean_name(name))
+    return round(len(pieces & known) / len(pieces), 3) if pieces else 0.0
+
+
+def is_new_class(row, hierarchy, minors):
+    """중분류나 소분류가 기준표에 없던 값이면 '새 분류'."""
+    return row["중분류"] not in hierarchy or row["소분류"] not in minors
+
+
 def build_hierarchy(master):
     """기준표에서 '중분류 → 대분류' 관계를 만든다.
     같은 중분류가 가장 많이 속한 대분류를 정상 부모로 본다 (소수 오입력은 오류로 간주)."""
@@ -61,6 +77,7 @@ def check_same_name(result, checked_master):
     for level in LEVELS:
         out["기존_" + level] = ""
     out["기존_담보코드"] = ""
+    out["기존 분류 비교"] = ""
     for i, row in out.iterrows():
         name = str(row["담보명"]).strip()
         if name in base.index and base.loc[name, "담보코드"] != row["담보코드"]:
@@ -68,16 +85,22 @@ def check_same_name(result, checked_master):
             out.at[i, "기존_담보코드"] = base.loc[name, "담보코드"]
             for level in LEVELS:
                 out.at[i, "기존_" + level] = base.loc[name, level]
+            same = all(row[lv] == base.loc[name, lv] for lv in LEVELS)
+            out.at[i, "기존 분류 비교"] = "같음" if same else "기존과 다름"
     return out
 
 
-def pick_approved(edited, hierarchy, master_codes):
-    """승인된 행을 기준표에 넣을 행과 건너뛸 행(사유 포함)으로 나눈다."""
+def pick_approved(edited, hierarchy, master_codes, minors):
+    """승인된 행을 기준표에 넣을 행과 건너뛸 행(사유 포함)으로 나눈다.
+    기준표에 없던 새 분류(중분류·소분류)는 '새 분류 확인'에 체크한 행만 반영한다."""
     ok, skipped = [], []
     for _, r in edited[edited["승인"]].iterrows():
+        new_class = is_new_class(r, hierarchy, minors)
         if any(str(r[c]).strip() == "" for c in LEVELS):
             reason = "누락 (4단계 중 빈 칸이 있음)"
-        elif not is_child(hierarchy, r["대분류"], r["중분류"]):
+        elif new_class and not r.get("새 분류 확인", False):
+            reason = "새 분류 (③에서 '새 분류 확인'을 체크해야 반영)"
+        elif not new_class and not is_child(hierarchy, r["대분류"], r["중분류"]):
             reason = "계층 오류 (중분류가 대분류의 하위가 아님)"
         elif r["상태"] == "동일 담보명(코드 상이)":
             reason = "동일 담보명 (기준표에 이미 있음)"

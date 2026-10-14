@@ -2,10 +2,11 @@
 import pandas as pd
 import streamlit as st
 
-from model import read_master, train, classify, accuracy
 from io import BytesIO
 
-from rules import LEVELS, check_master, check_same_name, pick_approved, loss_ratio_by_major
+import history
+from model import read_master, train, classify, accuracy
+from rules import LEVELS, check_master, check_same_name, pick_approved, is_new_class, loss_ratio_by_major
 
 st.set_page_config(page_title="신규 담보 자동 분류 도구", layout="wide")
 st.title("신규 담보 자동 분류 도구")
@@ -13,6 +14,17 @@ st.title("신규 담보 자동 분류 도구")
 # 화면이 새로고침되어도 값이 남도록 session_state에 보관한다
 for key in ["master", "checked", "models", "new_df", "new_file_id"]:
     st.session_state.setdefault(key, None)
+
+# 처음 열 때 가장 최근에 반영한 버전이 있으면 자동으로 불러와 학습한다
+if st.session_state["models"] is None and not st.session_state.get("autoload_done"):
+    st.session_state["autoload_done"] = True
+    latest = history.latest_master_path()
+    if latest is not None:
+        with st.spinner("최근 반영 버전을 불러오는 중입니다..."):
+            master = read_master(latest)
+            models, checked = train(master)
+        st.session_state.update(master=master, models=models, checked=checked,
+                                loaded_from=latest.parent.name)
 
 page = st.sidebar.radio(
     "메뉴", ["① 기준표 업로드·학습", "② 신규 담보 분류", "③ 수정·승인", "④ 반영·다운로드", "⑤ 손해율 집계(선택)"]
@@ -42,6 +54,9 @@ def color_review(row):
 # ---------- ① 기준표 업로드·학습 ----------
 if page == "① 기준표 업로드·학습":
     st.header("① 기준표 업로드·학습")
+    if st.session_state.get("loaded_from"):
+        st.info(f"최근 반영 버전({st.session_state['loaded_from']})을 자동으로 불러와 학습했습니다. "
+                "새 기준표로 바꾸려면 아래에서 업로드하세요.")
     file = st.file_uploader("기준표 엑셀 (coverage_master.xlsx, 첫 번째 시트 사용)", type="xlsx")
     if file:
         master = read_master(file)
@@ -81,11 +96,14 @@ elif page == "② 신규 담보 분류":
         st.session_state["new_file_id"] = file.file_id
         st.session_state.pop("edit_base", None)  # 새 파일이면 ③의 수정 내용 초기화
         st.session_state.pop("editor", None)
-    threshold = st.slider("신뢰도 기준 (이 값 이상이면 자동 분류)", 0.0, 1.0, 0.7, 0.05)
+    c1, c2 = st.columns(2)
+    threshold = c1.slider("신뢰도 기준 (이 값 이상이면 자동 분류)", 0.0, 1.0, 0.7, 0.05)
+    min_sim = c2.slider("기준표와의 유사도 기준 (이 값 미만이면 검토 필요)", 0.0, 1.0, 0.8, 0.05,
+                        help="기준표에 없던 표현이 많은 담보는 신뢰도가 높아도 사람이 확인하도록 합니다.")
 
     new_df = st.session_state["new_df"]
     if new_df is not None:
-        result = classify(st.session_state["models"], new_df, threshold)
+        result = classify(st.session_state["models"], new_df, threshold, min_sim)
         result = sort_by_status(check_same_name(result, st.session_state["checked"]))
         st.session_state["result"] = result
 
@@ -93,12 +111,12 @@ elif page == "② 신규 담보 분류":
         st.write("　".join(f"**{k}** {v}건" for k, v in counts.items()))
 
         # 동일 담보명이면 그 행 바로 아래에 기준표의 기존 행(회색)을 끼워 넣는다
-        show = ["상태", "담보코드", "담보명"] + LEVELS + ["신뢰도"]
+        show = ["상태", "담보코드", "담보명"] + LEVELS + ["신뢰도", "유사도"]
         rows = []
         for _, r in result.iterrows():
             rows.append(r[show])
             if r["상태"] == "동일 담보명(코드 상이)":
-                old = {"담보코드": r["기존_담보코드"], "담보명": r["담보명"], "신뢰도": None,
+                old = {"담보코드": r["기존_담보코드"], "담보명": r["담보명"], "신뢰도": None, "유사도": None,
                        "상태": "기존 기준표(참고)"}
                 old.update({lv: r["기존_" + lv] for lv in LEVELS})
                 rows.append(pd.Series(old)[show])
@@ -123,45 +141,63 @@ elif page == "③ 수정·승인":
         st.stop()
 
     # 표가 없거나, 열 구성이나 담보 순서가 ②의 결과와 달라졌으면 새로 만든다
-    columns = ["상태", "승인", "담보코드", "담보명"] + LEVELS + ["신뢰도", "동일한 기존 담보코드"]
+    columns = (["상태", "승인", "새 분류 확인", "담보코드", "담보명"] + LEVELS
+               + ["신뢰도", "유사도", "동일한 기존 담보코드", "기존 분류 비교"])
     result = st.session_state["result"]
     old = st.session_state.get("edit_base")
     if old is None or list(old.columns) != columns or list(old["담보코드"]) != list(result["담보코드"]):
         base = result[
-            ["상태", "담보코드", "담보명"] + LEVELS + ["신뢰도", "기존_담보코드"]
+            ["상태", "담보코드", "담보명"] + LEVELS + ["신뢰도", "유사도", "기존_담보코드", "기존 분류 비교"]
         ].rename(columns={"기존_담보코드": "동일한 기존 담보코드"})
         base.insert(1, "승인", False)
+        base.insert(2, "새 분류 확인", False)
         st.session_state["edit_base"] = base
         st.session_state.pop("editor", None)
 
-    def set_all(value):
-        """승인 칸을 전체 선택/해제한다. 이미 고친 분류 내용은 그대로 둔다."""
+    def set_approval(kind):
+        """승인 칸을 전체 선택 / 전체 해제 / 자동 분류만 선택한다. 고친 분류 내용은 그대로 둔다."""
         current = st.session_state.get("edited", st.session_state["edit_base"]).copy()
-        current["승인"] = value
+        if kind == "auto":
+            current["승인"] = current["상태"] == "자동 분류"
+        else:
+            current["승인"] = kind == "all"
         st.session_state["edit_base"] = current
         st.session_state.pop("editor", None)  # 표를 새 값으로 다시 그리도록 초기화
 
-    b1, b2, _ = st.columns([1, 1, 6])
-    b1.button("전체 선택", on_click=set_all, args=(True,))
-    b2.button("전체 해제", on_click=set_all, args=(False,))
+    b1, b2, b3, _ = st.columns([1, 1, 1.4, 5])
+    b1.button("전체 선택", on_click=set_approval, args=("all",))
+    b2.button("전체 해제", on_click=set_approval, args=("none",))
+    b3.button("자동 분류만 선택", on_click=set_approval, args=("auto",))
 
     base = st.session_state["edit_base"]
     master = st.session_state["master"]
-    options = lambda col: sorted(master[col].dropna().unique())
-    st.caption("분류 칸을 직접 고치고, 확인한 행은 '승인'에 체크하세요. 승인한 행만 기준표에 반영됩니다.")
+    st.caption("분류 칸을 직접 고치고, 확인한 행은 '승인'에 체크하세요. 승인한 행만 기준표에 반영됩니다. "
+               "중분류·소분류는 새 값을 직접 입력할 수 있고, 새 값이면 '새 분류 확인'도 체크해야 반영됩니다.")
     edited = st.data_editor(
         base, key="editor", hide_index=True, width="stretch",
-        disabled=["담보코드", "담보명", "신뢰도", "상태", "동일한 기존 담보코드"],
+        disabled=["담보코드", "담보명", "신뢰도", "유사도", "상태", "동일한 기존 담보코드", "기존 분류 비교"],
         column_config={
             "승인": st.column_config.CheckboxColumn("승인"),
-            "대분류": st.column_config.SelectboxColumn("대분류", options=options("대분류")),
-            "중분류": st.column_config.SelectboxColumn("중분류", options=options("중분류")),
-            "소분류": st.column_config.SelectboxColumn("소분류", options=options("소분류")),
-            "상세분류": st.column_config.TextColumn("상세분류 (새 값 직접 입력 가능)"),
+            "새 분류 확인": st.column_config.CheckboxColumn(
+                "새 분류 확인", help="기준표에 없는 중분류·소분류를 일부러 추가하는 경우에만 체크"),
+            "대분류": st.column_config.SelectboxColumn("대분류", options=sorted(master["대분류"].dropna().unique())),
+            "중분류": st.column_config.TextColumn("중분류 (새 값 입력 가능)"),
+            "소분류": st.column_config.TextColumn("소분류 (새 값 입력 가능)"),
+            "상세분류": st.column_config.TextColumn("상세분류 (새 값 입력 가능)"),
         },
     )
     st.session_state["edited"] = edited
     st.write(f"승인 **{int(edited['승인'].sum())}건** / 전체 {len(edited)}건")
+
+    # 새 분류인데 확인 체크가 빠진 승인 행을 알려준다
+    models = st.session_state["models"]
+    missing = [r["담보코드"] for _, r in edited[edited["승인"] & ~edited["새 분류 확인"]].iterrows()
+               if is_new_class(r, models["_hierarchy"], models["_minors"])]
+    if missing:
+        st.warning(f"기준표에 없는 새 분류입니다. 맞으면 '새 분류 확인'도 체크하세요: {', '.join(missing)}")
+    diff = edited[(edited["기존 분류 비교"] == "기존과 다름")]
+    if len(diff):
+        st.error(f"동일 담보명인데 예측이 기준표의 기존 분류와 다릅니다. 꼭 확인하세요: {', '.join(diff['담보코드'])}")
 
 # ---------- ④ 반영·다운로드 ----------
 elif page == "④ 반영·다운로드":
@@ -171,9 +207,20 @@ elif page == "④ 반영·다운로드":
         st.warning("먼저 ③ 화면에서 분류를 확인하고 승인해 주세요.")
         st.stop()
 
+    def to_excel(df, sheet):
+        buf = BytesIO()
+        df.to_excel(buf, index=False, sheet_name=sheet)
+        return buf.getvalue()
+
+    if st.session_state.get("apply_msg"):
+        st.success(st.session_state["apply_msg"])
+
     models, master = st.session_state["models"], st.session_state["master"]
-    ok, skipped = pick_approved(edited, models["_hierarchy"], set(master["담보코드"]))
-    st.write(f"승인 {int(edited['승인'].sum())}건 중 **반영 가능 {len(ok)}건**, 건너뜀 {len(skipped)}건")
+    ok, skipped = pick_approved(edited, models["_hierarchy"], set(master["담보코드"]), models["_minors"])
+    done = skipped[skipped["건너뛴 사유"].str.startswith("이미")] if len(skipped) else skipped
+    skipped = skipped.drop(done.index) if len(skipped) else skipped
+    st.write(f"승인 {int(edited['승인'].sum())}건 중 **반영 가능 {len(ok)}건**, 건너뜀 {len(skipped)}건"
+             + (f", 이미 반영됨 {len(done)}건" if len(done) else ""))
     if len(skipped):
         st.warning("아래 행은 반영되지 않습니다.")
         st.dataframe(skipped[["담보코드", "담보명"] + LEVELS + ["건너뛴 사유"]],
@@ -184,23 +231,57 @@ elif page == "④ 반영·다운로드":
         new_master = pd.concat([master, added], ignore_index=True)
         with st.spinner("재학습 중입니다..."):
             models, checked = train(new_master)
-        st.session_state["master"] = new_master
-        st.session_state["models"] = models
-        st.session_state["checked"] = checked
-        st.success(f"{len(added)}건을 기준표에 반영하고 재학습했습니다. "
-                   f"(기준표 {len(new_master)}건, 학습 {(checked['상태'] == '정상').sum()}건)")
+        st.session_state.update(master=new_master, models=models, checked=checked)
+        summary = {"반영 건수": len(added), "건너뜀 건수": len(skipped),
+                   "건너뜀 사유": skipped["건너뛴 사유"].tolist() if len(skipped) else [],
+                   "기준표 건수": len(new_master), "학습 건수": int((checked["상태"] == "정상").sum()),
+                   "반영한 담보코드": added["담보코드"].tolist()}
+        name = history.save_version(new_master, edited, summary)
+        st.session_state["apply_msg"] = (
+            f"{len(added)}건을 기준표에 반영하고 재학습했습니다. (기준표 {len(new_master)}건, "
+            f"학습 {summary['학습 건수']}건) 이력에 '{name}' 버전으로 저장했습니다.")
+        st.rerun()
 
-    def to_excel(df, sheet):
-        buf = BytesIO()
-        df.to_excel(buf, index=False, sheet_name=sheet)
-        return buf.getvalue()
-
-    st.subheader("엑셀 다운로드")
+    st.subheader("엑셀 다운로드 (현재 상태)")
     c1, c2 = st.columns(2)
     c1.download_button("분류 결과 (승인 여부 포함)", to_excel(edited, "분류결과"),
                        file_name="classification_result.xlsx")
     c2.download_button("갱신된 기준표", to_excel(st.session_state["master"], "기준표"),
                        file_name="coverage_master_updated.xlsx")
+
+    # ---- 반영 이력: 반영할 때마다 버전이 하나씩 쌓이고, 날짜별로 골라 내려받을 수 있다 ----
+    st.subheader("반영 이력")
+    st.caption("반영할 때마다 history 폴더에 저장됩니다. 클라우드에서는 앱이 재시작되면 사라질 수 있으니, "
+               "이력은 내 컴퓨터나 회사 서버에서 실행할 때 사용하세요.")
+    versions = history.list_versions()
+    if not versions:
+        st.info("아직 반영 이력이 없습니다.")
+    current_date = None
+    for v in versions:
+        if v["date"] != current_date:
+            current_date = v["date"]
+            st.markdown(f"##### {current_date}")
+        sm = v["summary"]
+        cols = st.columns([1.2, 3, 1.6, 1.6, 1])
+        cols[0].write(v["time"])
+        cols[1].write(f"반영 {sm.get('반영 건수', '?')}건 · 건너뜀 {sm.get('건너뜀 건수', '?')}건 · "
+                      f"기준표 {sm.get('기준표 건수', '?')}건")
+        cols[2].download_button("기준표 받기", history.read_file(v["name"], "master"),
+                                file_name=f"coverage_master_{v['name']}.xlsx", key=f"m_{v['name']}")
+        cols[3].download_button("결과 받기", history.read_file(v["name"], "result"),
+                                file_name=f"classification_{v['name']}.xlsx", key=f"r_{v['name']}")
+        if cols[4].button("삭제", key=f"d_{v['name']}"):
+            st.session_state["delete_pending"] = v["name"]
+        if st.session_state.get("delete_pending") == v["name"]:
+            st.warning(f"{v['date']} {v['time']} 버전을 삭제하면 되돌릴 수 없습니다. 정말 삭제할까요?")
+            y, n, _ = st.columns([1, 1, 6])
+            if y.button("삭제 확정", key=f"y_{v['name']}"):
+                history.delete_version(v["name"])
+                st.session_state["delete_pending"] = None
+                st.rerun()
+            if n.button("취소", key=f"n_{v['name']}"):
+                st.session_state["delete_pending"] = None
+                st.rerun()
 
 # ---------- ⑤ 손해율 집계 (선택) ----------
 else:
