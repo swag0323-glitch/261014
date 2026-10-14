@@ -293,6 +293,68 @@ def html_loss_tree(df, levels, open_all=False):
     return LOSS_CSS + f'<div class="lt">{head}{build(df, 0, True)}</div>'
 
 
+# 손해율 차트 (plotly). 표와 같은 규칙(보험금 합계 ÷ 위험보험료 합계 × 100)으로 계산한다
+RATE_SCALE = [[0, "#17693a"], [0.5, "#d9a21b"], [1, "#a4161a"]]   # 초록(낮음) → 노랑 → 빨강(높음)
+
+
+def loss_nodes(df, levels):
+    """분류 경로(대 > 중 > 소 > 상세)별 합계 표: 차트의 한 칸(노드)이 한 줄이다."""
+    rows = []
+    for k in range(1, len(levels) + 1):
+        g = df.groupby(levels[:k], sort=False)[["위험보험료", "보험금"]].sum().reset_index()
+        for _, r in g.iterrows():
+            path = [r[lv] for lv in levels[:k]]
+            rows.append({"id": " / ".join(path), "label": path[-1], "parent": " / ".join(path[:-1]), "level": k - 1,
+                         "path": " > ".join(path), "prem": r["위험보험료"], "loss": r["보험금"],
+                         "rate": r["보험금"] / r["위험보험료"] * 100 if r["위험보험료"] > 0 else 0})
+    return pd.DataFrame(rows)
+
+
+def show_loss_charts(df, levels, total_rate):
+    """차트로 보기: 트리맵(크기=위험보험료, 색=손해율)과 단계 선택 막대."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        st.info("차트를 보려면 plotly 설치가 필요합니다 (requirements.txt에 포함). 표로 보기는 그대로 사용할 수 있습니다.")
+        return
+    nodes = loss_nodes(df, levels)
+    kind = st.radio("차트 종류", ["트리맵 (크기=위험보험료, 색=손해율)", "단계 선택 막대"], horizontal=True, key="chart_kind")
+    if kind.startswith("트리맵"):
+        fig = go.Figure(go.Treemap(
+            ids=nodes["id"], labels=nodes["label"], parents=nodes["parent"], values=nodes["prem"], branchvalues="total",
+            maxdepth=2, pathbar=dict(visible=True), text=[f"{r:.1f}%" for r in nodes["rate"]], textinfo="label+text",
+            customdata=nodes[["prem", "loss", "rate", "path"]].values,
+            hovertemplate="<b>%{customdata[3]}</b><br>위험보험료 %{customdata[0]:,.0f}<br>보험금 %{customdata[1]:,.0f}"
+                          "<br>손해율 %{customdata[2]:.1f}%<extra></extra>",
+            marker=dict(colors=nodes["rate"], colorscale=RATE_SCALE, cmin=40, cmax=80,
+                        colorbar=dict(title="손해율(%)", thickness=12, len=0.8))))
+        fig.update_layout(margin=dict(l=4, r=4, t=8, b=4), height=520)
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+        st.caption("사각형 크기 = 위험보험료, 색 = 손해율(초록 낮음 · 노랑 중간 · 빨강 높음). "
+                   "사각형을 클릭하면 한 단계 아래로 들어가고, 위쪽 경로를 누르면 되돌아옵니다.")
+    else:
+        fig = go.Figure()
+        buttons = []
+        start = min(1, len(levels) - 1)                                    # 처음에는 중분류를 보여준다
+        for i, lv in enumerate(levels):
+            sub = nodes[nodes["level"] == i].sort_values("prem", ascending=False).head(14).sort_values("prem")
+            fig.add_trace(go.Bar(
+                x=sub["rate"], y=sub["path"], orientation="h", visible=(i == start),
+                marker=dict(color=sub["rate"], colorscale=RATE_SCALE, cmin=40, cmax=80),
+                text=[f"{r:.1f}%" for r in sub["rate"]], textposition="outside",
+                customdata=sub[["prem", "loss"]].values,
+                hovertemplate="<b>%{y}</b><br>위험보험료 %{customdata[0]:,.0f}<br>보험금 %{customdata[1]:,.0f}"
+                              "<br>손해율 %{x:.1f}%<extra></extra>"))
+            buttons.append(dict(label=lv, method="update", args=[{"visible": [j == i for j in range(len(levels))]}]))
+        fig.add_vline(x=total_rate, line_dash="dot", annotation_text=f"전체 {total_rate:.1f}%", annotation_position="top")
+        fig.update_layout(margin=dict(l=4, r=40, t=40, b=30), height=480, yaxis=dict(automargin=True),
+                          xaxis=dict(title="손해율(%)", range=[0, max(100, nodes["rate"].max() * 1.15)]),
+                          updatemenus=[dict(type="buttons", direction="right", x=0, y=1.12, buttons=buttons, active=start)])
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+        st.caption("위의 단계 버튼으로 대분류 · 중분류 · 소분류 · 상세분류를 바꿔 봅니다. 위험보험료가 큰 14개의 손해율을 비교하고, "
+                   "점선은 전체 손해율입니다.")
+
+
 # ---------- ① 기존 특약분류표 업로드·학습 ----------
 if page == "① 기존 특약분류표 업로드·학습":
     st.header("① 기존 특약분류표 업로드·학습")
@@ -736,9 +798,13 @@ else:
         if len(levels) < 4:
             st.info("이 실적은 담보코드 단위라 대분류·중분류까지만 보여줍니다. "
                     "소분류·상세분류까지 보려면 특약코드 단위 실적을 올려 주세요.")
-        st.checkbox("모두 펼치기", key="open_all")
-        st.html(html_loss_tree(df, levels, st.session_state.get("open_all", False)))
-        st.caption("줄을 누르면 한 단계 아래로 펼쳐집니다. 손해율 = 그 줄의 보험금 합계 ÷ 위험보험료 합계 × 100 "
-                   "(아래 단계 손해율의 평균이 아닙니다)")
+        tab_table, tab_chart = st.tabs(["표로 보기", "차트로 보기"])
+        with tab_table:
+            st.checkbox("모두 펼치기", key="open_all")
+            st.html(html_loss_tree(df, levels, st.session_state.get("open_all", False)))
+            st.caption("줄을 누르면 한 단계 아래로 펼쳐집니다. 손해율 = 그 줄의 보험금 합계 ÷ 위험보험료 합계 × 100 "
+                       "(아래 단계 손해율의 평균이 아닙니다)")
+        with tab_chart:
+            show_loss_charts(df, levels, total)
 
 nav_buttons()
