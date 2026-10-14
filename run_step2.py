@@ -1,4 +1,4 @@
-"""2단계 확인용: 기준표 검사(누락/계층 오류)와 신규 담보 검사(동일 담보명, 계층 불일치)."""
+"""2단계 확인용: 기준표 검사(누락/계층 오류)와 신규 특약 검사(동일 특약명, 계층 불일치)."""
 import pandas as pd
 from model import read_master, train, classify
 from rules import check_same_name
@@ -14,10 +14,10 @@ print(checked[checked["상태"] != "정상"].to_string(index=False), "\n")
 
 new = pd.read_excel("new_coverage.xlsx", dtype=str)
 result = check_same_name(classify(models, new), checked)
-print("[신규 담보 상태별 건수]")
+print("[신규 특약 상태별 건수]")
 print(result["상태"].value_counts().to_string(), "\n")
 
-print("[동일 담보명(코드 상이)] 예측 vs 기준표 기존 분류")
-same = result[result["상태"] == "동일 담보명(코드 상이)"]
-print(same[["담보코드", "담보명", "대분류", "중분류", "소분류", "상세분류",
-            "기존_담보코드", "기존_대분류", "기존_중분류", "기존_소분류", "기존_상세분류"]].to_string(index=False))
+print("[동일 특약명(코드 상이)] 예측 vs 기준표 기존 분류")
+same = result[result["상태"] == "동일 특약명(코드 상이)"]
+print(same[["특약코드", "특약명", "중분류", "소분류",
+            "기존_특약코드", "기존_중분류", "기존_소분류"]].to_string(index=False))

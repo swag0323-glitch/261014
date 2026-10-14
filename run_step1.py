@@ -18,6 +18,6 @@ per_level, by_type = accuracy(result, answer)
 print("단계별 정확도:")
 for lv, v in per_level.items():
     print(f"  {lv}: {v:.1%}")
-print("유형별 정확도(상세분류 기준):")
+print("유형별 정확도(중분류·소분류 모두 일치 기준):")
 for t, v in by_type.items():
     print(f"  {t}: {v:.1%}")

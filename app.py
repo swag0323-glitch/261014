@@ -1,4 +1,4 @@
-"""신규 담보 자동 분류 도구 (Streamlit 화면). 실행: streamlit run app.py"""
+"""신규 담보(특약) 자동 분류 도구 (Streamlit 화면). 실행: streamlit run app.py"""
 import pandas as pd
 import streamlit as st
 
@@ -6,10 +6,10 @@ from io import BytesIO
 
 import history
 from model import read_master, train, classify, accuracy
-from rules import LEVELS, check_master, check_same_name, pick_approved, is_new_class, loss_ratio_by_major
+from rules import (LEVELS, INPUT_COLS, MASTER_COLS, missing_columns, check_master, check_same_name, pick_approved, is_new_class, loss_ratio_by_major)
 
-st.set_page_config(page_title="신규 담보 자동 분류 도구", layout="wide")
-st.title("신규 담보 자동 분류 도구")
+st.set_page_config(page_title="신규 담보(특약) 자동 분류 도구", layout="wide")
+st.title("신규 담보(특약) 자동 분류 도구")
 
 # 화면이 새로고침되어도 값이 남도록 session_state에 보관한다
 for key in ["master", "checked", "models", "new_df", "new_file_id"]:
@@ -27,11 +27,11 @@ if st.session_state["models"] is None and not st.session_state.get("autoload_don
                                 loaded_from=latest.parent.name)
 
 page = st.sidebar.radio(
-    "메뉴", ["① 기준표 업로드·학습", "② 신규 담보 분류", "③ 수정·승인", "④ 반영·다운로드", "⑤ 손해율 집계(선택)"]
+    "메뉴", ["① 기준표 업로드·학습", "② 신규 특약 분류", "③ 수정·승인", "④ 반영·다운로드", "⑤ 손해율 집계(선택)"]
 )
 
 
-STATUS_ORDER = ["검토 필요", "계층 불일치", "동일 담보명(코드 상이)", "자동 분류"]
+STATUS_ORDER = ["검토 필요", "계층 불일치", "동일 특약명(코드 상이)", "자동 분류"]
 
 
 def sort_by_status(df):
@@ -60,6 +60,10 @@ if page == "① 기준표 업로드·학습":
     file = st.file_uploader("기준표 엑셀 (coverage_master.xlsx, 첫 번째 시트 사용)", type="xlsx")
     if file:
         master = read_master(file)
+        lack = missing_columns(master, MASTER_COLS)
+        if lack:
+            st.error(f"기준표에 없는 열이 있습니다: {', '.join(lack)}  (필요한 열: {', '.join(MASTER_COLS)})")
+            st.stop()
         # 학습 전에 검사만 먼저 해서 건수를 보여준다
         checked = check_master(master)
         counts = checked["상태"].value_counts()
@@ -83,23 +87,28 @@ if page == "① 기준표 업로드·학습":
     elif st.session_state["models"] is not None:
         st.info("이미 학습된 모델이 있습니다. 다시 학습하려면 기준표를 업로드하세요.")
 
-# ---------- ② 신규 담보 분류 ----------
-elif page == "② 신규 담보 분류":
-    st.header("② 신규 담보 분류")
+# ---------- ② 신규 특약 분류 ----------
+elif page == "② 신규 특약 분류":
+    st.header("② 신규 특약 분류")
     if st.session_state["models"] is None:
         st.warning("먼저 ① 화면에서 기준표를 올리고 학습해 주세요.")
         st.stop()
 
-    file = st.file_uploader("신규 담보 엑셀 (담보코드, 담보명)", type="xlsx")
+    file = st.file_uploader(f"신규 특약 엑셀 ({', '.join(INPUT_COLS)})", type="xlsx")
     if file and st.session_state["new_file_id"] != file.file_id:
-        st.session_state["new_df"] = pd.read_excel(file, dtype=str)
+        new_df = pd.read_excel(file, dtype=str)
+        lack = missing_columns(new_df, INPUT_COLS)
+        if lack:
+            st.error(f"신규 특약 파일에 없는 열이 있습니다: {', '.join(lack)}")
+            st.stop()
+        st.session_state["new_df"] = new_df
         st.session_state["new_file_id"] = file.file_id
         st.session_state.pop("edit_base", None)  # 새 파일이면 ③의 수정 내용 초기화
         st.session_state.pop("editor", None)
     c1, c2 = st.columns(2)
     threshold = c1.slider("신뢰도 기준 (이 값 이상이면 자동 분류)", 0.0, 1.0, 0.7, 0.05)
     min_sim = c2.slider("기준표와의 유사도 기준 (이 값 미만이면 검토 필요)", 0.0, 1.0, 0.8, 0.05,
-                        help="기준표에 없던 표현이 많은 담보는 신뢰도가 높아도 사람이 확인하도록 합니다.")
+                        help="기준표에 없던 표현이 많은 특약은 신뢰도가 높아도 사람이 확인하도록 합니다.")
 
     new_df = st.session_state["new_df"]
     if new_df is not None:
@@ -110,13 +119,14 @@ elif page == "② 신규 담보 분류":
         counts = result["상태"].value_counts()
         st.write("　".join(f"**{k}** {v}건" for k, v in counts.items()))
 
-        # 동일 담보명이면 그 행 바로 아래에 기준표의 기존 행(회색)을 끼워 넣는다
-        show = ["상태", "담보코드", "담보명"] + LEVELS + ["신뢰도", "유사도"]
+        # 동일 특약명이면 그 행 바로 아래에 기준표의 기존 행(회색)을 끼워 넣는다
+        show = ["상태", "담보코드", "담보명", "특약코드", "특약명"] + LEVELS + ["신뢰도", "유사도"]
         rows = []
         for _, r in result.iterrows():
             rows.append(r[show])
-            if r["상태"] == "동일 담보명(코드 상이)":
-                old = {"담보코드": r["기존_담보코드"], "담보명": r["담보명"], "신뢰도": None, "유사도": None,
+            if r["상태"] == "동일 특약명(코드 상이)":
+                old = {"담보코드": r["담보코드"], "담보명": r["담보명"], "특약코드": r["기존_특약코드"],
+                       "특약명": r["특약명"], "신뢰도": None, "유사도": None,
                        "상태": "기존 기준표(참고)"}
                 old.update({lv: r["기존_" + lv] for lv in LEVELS})
                 rows.append(pd.Series(old)[show])
@@ -130,25 +140,25 @@ elif page == "② 신규 담보 분류":
                 per_level, by_type = accuracy(result, pd.read_excel(key_file, dtype=str))
                 st.write("**단계별 정확도**")
                 st.table(pd.Series(per_level, name="정확도").map("{:.1%}".format))
-                st.write("**유형별 정확도 (상세분류 기준)**")
+                st.write("**유형별 정확도 (중분류·소분류 모두 일치 기준)**")
                 st.table(pd.Series(by_type, name="정확도").map("{:.1%}".format))
 
 # ---------- ③ 수정·승인 ----------
 elif page == "③ 수정·승인":
     st.header("③ 수정·승인")
     if st.session_state.get("result") is None:
-        st.warning("먼저 ② 화면에서 신규 담보를 분류해 주세요.")
+        st.warning("먼저 ② 화면에서 신규 특약을 분류해 주세요.")
         st.stop()
 
-    # 표가 없거나, 열 구성이나 담보 순서가 ②의 결과와 달라졌으면 새로 만든다
-    columns = (["상태", "승인", "새 분류 확인", "담보코드", "담보명"] + LEVELS
-               + ["신뢰도", "유사도", "동일한 기존 담보코드", "기존 분류 비교"])
+    # 표가 없거나, 열 구성이나 특약 순서가 ②의 결과와 달라졌으면 새로 만든다
+    columns = (["상태", "승인", "새 분류 확인", "특약코드", "특약명", "담보코드", "담보명"] + LEVELS
+               + ["신뢰도", "유사도", "동일한 기존 특약코드", "기존 분류 비교"])
     result = st.session_state["result"]
     old = st.session_state.get("edit_base")
-    if old is None or list(old.columns) != columns or list(old["담보코드"]) != list(result["담보코드"]):
+    if old is None or list(old.columns) != columns or list(old["특약코드"]) != list(result["특약코드"]):
         base = result[
-            ["상태", "담보코드", "담보명"] + LEVELS + ["신뢰도", "유사도", "기존_담보코드", "기존 분류 비교"]
-        ].rename(columns={"기존_담보코드": "동일한 기존 담보코드"})
+            ["상태", "특약코드", "특약명", "담보코드", "담보명"] + LEVELS + ["신뢰도", "유사도", "기존_특약코드", "기존 분류 비교"]
+        ].rename(columns={"기존_특약코드": "동일한 기존 특약코드"})
         base.insert(1, "승인", False)
         base.insert(2, "새 분류 확인", False)
         st.session_state["edit_base"] = base
@@ -171,19 +181,18 @@ elif page == "③ 수정·승인":
 
     base = st.session_state["edit_base"]
     master = st.session_state["master"]
-    st.caption("분류 칸을 직접 고치고, 확인한 행은 '승인'에 체크하세요. 승인한 행만 기준표에 반영됩니다. "
-               "중분류·소분류는 새 값을 직접 입력할 수 있고, 새 값이면 '새 분류 확인'도 체크해야 반영됩니다.")
+    st.caption("중분류·소분류를 직접 고치고(대분류·상세분류는 입력값이라 고칠 수 없습니다), 확인한 행은 '승인'에 체크하세요. 승인한 행만 기준표에 반영됩니다. "
+               "새 값을 직접 입력할 수 있고, 새 값이면 '새 분류 확인'도 체크해야 반영됩니다.")
     edited = st.data_editor(
         base, key="editor", hide_index=True, width="stretch",
-        disabled=["담보코드", "담보명", "신뢰도", "유사도", "상태", "동일한 기존 담보코드", "기존 분류 비교"],
+        disabled=["특약코드", "특약명", "담보코드", "담보명", "대분류", "상세분류", "신뢰도", "유사도", "상태",
+                  "동일한 기존 특약코드", "기존 분류 비교"],
         column_config={
             "승인": st.column_config.CheckboxColumn("승인"),
             "새 분류 확인": st.column_config.CheckboxColumn(
                 "새 분류 확인", help="기준표에 없는 중분류·소분류를 일부러 추가하는 경우에만 체크"),
-            "대분류": st.column_config.SelectboxColumn("대분류", options=sorted(master["대분류"].dropna().unique())),
             "중분류": st.column_config.TextColumn("중분류 (새 값 입력 가능)"),
             "소분류": st.column_config.TextColumn("소분류 (새 값 입력 가능)"),
-            "상세분류": st.column_config.TextColumn("상세분류 (새 값 입력 가능)"),
         },
     )
     st.session_state["edited"] = edited
@@ -191,13 +200,13 @@ elif page == "③ 수정·승인":
 
     # 새 분류인데 확인 체크가 빠진 승인 행을 알려준다
     models = st.session_state["models"]
-    missing = [r["담보코드"] for _, r in edited[edited["승인"] & ~edited["새 분류 확인"]].iterrows()
+    missing = [r["특약코드"] for _, r in edited[edited["승인"] & ~edited["새 분류 확인"]].iterrows()
                if is_new_class(r, models["_hierarchy"], models["_minors"])]
     if missing:
         st.warning(f"기준표에 없는 새 분류입니다. 맞으면 '새 분류 확인'도 체크하세요: {', '.join(missing)}")
     diff = edited[(edited["기존 분류 비교"] == "기존과 다름")]
     if len(diff):
-        st.error(f"동일 담보명인데 예측이 기준표의 기존 분류와 다릅니다. 꼭 확인하세요: {', '.join(diff['담보코드'])}")
+        st.error(f"동일 특약명인데 예측이 기준표의 기존 분류와 다릅니다. 꼭 확인하세요: {', '.join(diff['특약코드'])}")
 
 # ---------- ④ 반영·다운로드 ----------
 elif page == "④ 반영·다운로드":
@@ -216,18 +225,18 @@ elif page == "④ 반영·다운로드":
         st.success(st.session_state["apply_msg"])
 
     models, master = st.session_state["models"], st.session_state["master"]
-    ok, skipped = pick_approved(edited, models["_hierarchy"], set(master["담보코드"]), models["_minors"])
+    ok, skipped = pick_approved(edited, models["_hierarchy"], set(master["특약코드"]), models["_minors"])
     done = skipped[skipped["건너뛴 사유"].str.startswith("이미")] if len(skipped) else skipped
     skipped = skipped.drop(done.index) if len(skipped) else skipped
     st.write(f"승인 {int(edited['승인'].sum())}건 중 **반영 가능 {len(ok)}건**, 건너뜀 {len(skipped)}건"
              + (f", 이미 반영됨 {len(done)}건" if len(done) else ""))
     if len(skipped):
         st.warning("아래 행은 반영되지 않습니다.")
-        st.dataframe(skipped[["담보코드", "담보명"] + LEVELS + ["건너뛴 사유"]],
+        st.dataframe(skipped[["특약코드", "특약명"] + LEVELS + ["건너뛴 사유"]],
                      hide_index=True, width="stretch")
 
     if st.button("승인분 기준표 반영 + 재학습", type="primary", disabled=len(ok) == 0):
-        added = ok[["담보코드", "담보명"] + LEVELS]
+        added = ok[MASTER_COLS]
         new_master = pd.concat([master, added], ignore_index=True)
         with st.spinner("재학습 중입니다..."):
             models, checked = train(new_master)
@@ -235,7 +244,7 @@ elif page == "④ 반영·다운로드":
         summary = {"반영 건수": len(added), "건너뜀 건수": len(skipped),
                    "건너뜀 사유": skipped["건너뛴 사유"].tolist() if len(skipped) else [],
                    "기준표 건수": len(new_master), "학습 건수": int((checked["상태"] == "정상").sum()),
-                   "반영한 담보코드": added["담보코드"].tolist()}
+                   "반영한 특약코드": added["특약코드"].tolist()}
         name = history.save_version(new_master, edited, summary)
         st.session_state["apply_msg"] = (
             f"{len(added)}건을 기준표에 반영하고 재학습했습니다. (기준표 {len(new_master)}건, "
@@ -293,7 +302,7 @@ else:
     file = st.file_uploader("담보별 실적 엑셀 (coverage_perf.xlsx)", type="xlsx")
     if file:
         perf = pd.read_excel(file, dtype={"기준월": str, "담보코드": str})
-        # 기준표 분류를 바탕으로, ③에서 수정한 신규 담보 분류가 있으면 그것을 우선한다
+        # 기준표 분류를 바탕으로, ③에서 수정한 신규 특약 분류가 있으면 그것을 우선한다
         table = st.session_state["master"][["담보코드", "대분류"]]
         edited = st.session_state.get("edited")
         if edited is not None:

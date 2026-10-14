@@ -3,10 +3,18 @@ import re
 import pandas as pd
 
 LEVELS = ["대분류", "중분류", "소분류", "상세분류"]
+PREDICT_LEVELS = ["중분류", "소분류"]   # 모델이 예측하는 단계 (대분류·상세분류는 입력에 이미 있다)
+INPUT_COLS = ["담보코드", "담보명", "특약코드", "특약명", "대분류", "상세분류"]   # 신규 특약 파일의 열
+MASTER_COLS = ["담보코드", "담보명", "특약코드", "특약명", "대분류", "중분류", "소분류", "상세분류"]   # 기준표의 열
+
+
+def missing_columns(df, cols):
+    """엑셀에 꼭 있어야 하는 열 중 빠진 것의 목록 (화면에서 안내용)."""
+    return [c for c in cols if c not in df.columns]
 
 
 def clean_name(name):
-    """담보명 전처리: 괄호 문구, 공백, Ⅱ/Ⅲ, 플러스, 특약, N종 제거 + 진단금→진단비."""
+    """특약명 전처리: 괄호 문구, 공백, Ⅱ/Ⅲ, 플러스, 특약, N종 제거 + 진단금→진단비."""
     s = str(name)
     s = re.sub(r"\([^)]*\)|（[^）]*）", "", s)   # 괄호 안 문구 제거
     s = re.sub(r"\d+종", "", s)                  # N종 제거
@@ -22,7 +30,7 @@ def bigrams(text):
 
 
 def name_similarity(name, known):
-    """신규 담보명의 글자 조각 중 기준표에도 있던 비율 (0~1). 낮을수록 기준표에 없던 새 표현이다."""
+    """신규 특약명의 글자 조각 중 기준표에도 있던 비율 (0~1). 낮을수록 기준표에 없던 새 표현이다."""
     pieces = bigrams(clean_name(name))
     return round(len(pieces & known) / len(pieces), 3) if pieces else 0.0
 
@@ -66,26 +74,26 @@ def check_master(master):
 
 
 def check_same_name(result, checked_master):
-    """신규 담보 중 담보명이 기준표에 이미 있는데 코드가 다르면 '동일 담보명(코드 상이)'으로 표시.
-    기준표의 기존 분류를 '기존_대분류' 등 컬럼으로 함께 붙인다."""
+    """신규 특약 중 특약명이 기준표에 이미 있는데 특약코드가 다르면 '동일 특약명(코드 상이)'으로 표시.
+    기준표의 기존 분류를 '기존_대분류' 등 컬럼으로 함께 붙이고, 중·소분류 예측이 기존과 같은지 비교한다."""
     out = result.copy()
     # 정상 행을 먼저 두어, 같은 이름이 여러 개면 정상 행의 분류를 보여준다
     base = checked_master.assign(_ord=(checked_master["상태"] != "정상"))
-    base = base.sort_values("_ord").drop_duplicates("담보명")
-    base = base.set_index(base["담보명"].str.strip())
+    base = base.sort_values("_ord").drop_duplicates("특약명")
+    base = base.set_index(base["특약명"].str.strip())
 
     for level in LEVELS:
         out["기존_" + level] = ""
-    out["기존_담보코드"] = ""
+    out["기존_특약코드"] = ""
     out["기존 분류 비교"] = ""
     for i, row in out.iterrows():
-        name = str(row["담보명"]).strip()
-        if name in base.index and base.loc[name, "담보코드"] != row["담보코드"]:
-            out.at[i, "상태"] = "동일 담보명(코드 상이)"
-            out.at[i, "기존_담보코드"] = base.loc[name, "담보코드"]
+        name = str(row["특약명"]).strip()
+        if name in base.index and base.loc[name, "특약코드"] != row["특약코드"]:
+            out.at[i, "상태"] = "동일 특약명(코드 상이)"
+            out.at[i, "기존_특약코드"] = base.loc[name, "특약코드"]
             for level in LEVELS:
                 out.at[i, "기존_" + level] = base.loc[name, level]
-            same = all(row[lv] == base.loc[name, lv] for lv in LEVELS)
+            same = all(row[lv] == base.loc[name, lv] for lv in PREDICT_LEVELS)
             out.at[i, "기존 분류 비교"] = "같음" if same else "기존과 다름"
     return out
 
@@ -102,10 +110,10 @@ def pick_approved(edited, hierarchy, master_codes, minors):
             reason = "새 분류 (③에서 '새 분류 확인'을 체크해야 반영)"
         elif not new_class and not is_child(hierarchy, r["대분류"], r["중분류"]):
             reason = "계층 오류 (중분류가 대분류의 하위가 아님)"
-        elif r["상태"] == "동일 담보명(코드 상이)":
-            reason = "동일 담보명 (기준표에 이미 있음)"
-        elif r["담보코드"] in master_codes:
-            reason = "이미 기준표에 있는 담보코드"
+        elif r["상태"] == "동일 특약명(코드 상이)":
+            reason = "동일 특약명 (기준표에 이미 있음)"
+        elif r["특약코드"] in master_codes:
+            reason = "이미 기준표에 있는 특약코드"
         else:
             ok.append(r)
             continue
