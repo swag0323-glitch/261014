@@ -99,6 +99,27 @@ def check_same_name(result, checked_master):
     return out
 
 
+def explain_row(r, threshold, min_sim, hierarchy):
+    """신규 특약 한 행의 '이유'를 돌려준다: [(종류, [칸 이름들], 설명 글자), ...]
+    종류: miss(입력 비어 있음) / hier(계층 불일치) / dup(동일 특약명) / diff(기존과 다름) / low(신뢰도) / sim(유사도)"""
+    out = []
+    for col in ["대분류", "상세분류"]:
+        if str(r[col]).strip() == "":
+            out.append(("miss", [col], f"{col}가 비어 있음 (입력 확인)"))
+    if str(r["대분류"]).strip() and not is_child(hierarchy, r["대분류"], r["중분류"]):
+        out.append(("hier", ["대분류", "중분류"], f'{r["중분류"]}은(는) {r["대분류"]}의 하위가 아님'))
+    if r["상태"] == "동일 특약명(코드 상이)":
+        out.append(("dup", ["특약코드", "특약명"], f'기준표 {r["기존_특약코드"]}와 특약명 동일'))
+        if r["기존 분류 비교"] == "기존과 다름":
+            cols = [lv for lv in PREDICT_LEVELS if r[lv] != r["기존_" + lv]]
+            out.append(("diff", cols, "예측이 기존 분류와 다름"))
+    if r["신뢰도"] < threshold:
+        out.append(("low", ["신뢰도"], f'신뢰도 {r["신뢰도"]:.2f} (기준 {threshold:g} 미만)'))
+    if r["유사도"] < min_sim:
+        out.append(("sim", ["유사도"], f'유사도 {r["유사도"]:.2f} (기준 {min_sim:g} 미만)'))
+    return out
+
+
 def pick_approved(edited, hierarchy, master_codes, minors):
     """승인된 행을 기준표에 넣을 행과 건너뛸 행(사유 포함)으로 나눈다.
     기준표에 없던 새 분류(중분류·소분류)는 '새 분류 확인'에 체크한 행만 반영한다."""

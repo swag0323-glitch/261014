@@ -6,7 +6,7 @@ from io import BytesIO
 
 import history
 from model import read_master, train, classify, accuracy
-from rules import (LEVELS, INPUT_COLS, MASTER_COLS, missing_columns, check_master, check_same_name, pick_approved, is_new_class, loss_ratio_by_major)
+from rules import (LEVELS, INPUT_COLS, MASTER_COLS, missing_columns, check_master, check_same_name, pick_approved, is_new_class, loss_ratio_by_major, explain_row)
 
 st.set_page_config(page_title="신규 담보(특약) 자동 분류 도구", layout="wide")
 st.title("신규 담보(특약) 자동 분류 도구")
@@ -72,15 +72,21 @@ def sort_by_status(df):
     return df.assign(_순서=rank).sort_values("_순서", kind="stable").drop(columns="_순서").reset_index(drop=True)
 
 
-def color_review(row):
-    """검토 필요 행은 빨간색으로 표시"""
-    if row["상태"] == "검토 필요":
-        style = "background-color: #ffd6d6; color: #b00020"
-    elif row["상태"] == "기존 기준표(참고)":
-        style = "background-color: #eeeeee; color: #555555"
-    else:
-        style = ""
-    return [style] * len(row)
+# 칸 색 (배경색과 글자색을 함께 지정해 밝은/어두운 화면 모두에서 읽히게 한다)
+KIND_STYLE = {
+    "low": "background-color: #fde4e4; color: #a4161a; font-weight: 700",    # 신뢰도 낮음
+    "sim": "background-color: #fff0cf; color: #8a5300; font-weight: 700",    # 유사도 낮음
+    "hier": "background-color: #ece5fb; color: #5a2fa8; font-weight: 700",   # 계층 불일치
+    "dup": "background-color: #dfeeff; color: #0b57b5; font-weight: 700",    # 동일 특약명
+    "diff": "background-color: #ffd08a; color: #6b3a00; font-weight: 700",   # 기존 분류와 다름
+    "miss": "background-color: #fde4e4; color: #a4161a; font-style: italic", # 입력 비어 있음
+    "model": "background-color: #eef0fc; color: #3a45a8",                    # 모델 추천값
+    "ref": "background-color: #eeeeee; color: #555555",                      # 기존 기준표(참고)
+}
+STATUS_TEXT = {
+    "자동 분류": "color: #17693a; font-weight: 700", "검토 필요": "color: #a4161a; font-weight: 700",
+    "계층 불일치": "color: #5a2fa8; font-weight: 700", "동일 특약명(코드 상이)": "color: #0b57b5; font-weight: 700",
+}
 
 
 # ---------- ① 기준표 업로드·학습 ----------
@@ -166,20 +172,79 @@ elif page == "② 신규 특약 분류":
         counts = result["상태"].value_counts()
         st.write("　".join(f"**{k}** {v}건" for k, v in counts.items()))
 
-        # 동일 특약명이면 그 행 바로 아래에 기준표의 기존 행(회색)을 끼워 넣는다
-        show = ["상태", "담보코드", "담보명", "특약코드", "특약명"] + LEVELS + ["신뢰도", "유사도"]
-        rows = []
+        with st.expander("상태 안내 · 색 안내", expanded=True):
+            st.markdown(
+                "| 상태 | 붙는 조건 | 할 일 |\n|---|---|---|\n"
+                "| **자동 분류** | 신뢰도와 유사도가 모두 기준 이상 | 대체로 그대로 승인 |\n"
+                "| **검토 필요** | 신뢰도나 유사도가 기준 미만, 또는 입력의 대분류·상세분류가 비어 있음 | 추천값을 확인하고 필요하면 수정 |\n"
+                "| **계층 불일치** | 추천한 중분류가 입력된 대분류의 하위가 아님 | 중분류나 대분류를 고침 |\n"
+                "| **동일 특약명(코드 상이)** | 기준표에 같은 특약명이 있는데 특약코드가 다름 | 중복 등록인지 확인 (기존 분류가 아래 줄에 표시됨) |\n")
+            st.markdown(
+                "- **입력**: 파일에 있던 값(특약코드·특약명·대분류·상세분류). **추천**: 중분류·소분류는 입력 파일에 없는 값이고, "
+                "기준표로 학습한 모델이 계산한 추천값입니다 (연한 남색 바탕).\n"
+                "- **신뢰도**는 모델이 자기 답을 얼마나 확신하는지, **유사도**는 특약명의 글자 조합이 기준표에 얼마나 있었는지입니다. "
+                "낯선 표현이면 신뢰도가 높아도 검토 필요로 둡니다.\n"
+                "- 이유가 여러 개여도 상태는 하나만 보입니다 (우선순위: 동일 특약명 > 입력 비어 있음 > 계층 불일치 > 검토 필요·자동 분류). "
+                "이유는 해당 칸의 색과 '이유' 열에 모두 나옵니다.")
+            st.markdown(
+                "색: " + " ".join(f'<span style="{KIND_STYLE[k]}; padding:1px 8px; border-radius:4px">{t}</span>' for k, t in [
+                    ("low", "신뢰도 낮음"), ("sim", "유사도 낮음"), ("hier", "계층 불일치"), ("dup", "동일 특약명"),
+                    ("diff", "기존과 다름"), ("miss", "입력 비어 있음"), ("model", "모델 추천값")]),
+                unsafe_allow_html=True)
+
+        # 이유가 있는 칸만 색칠한다. 동일 특약명이면 그 행 바로 아래에 기준표의 기존 행(회색)을 끼워 넣는다
+        # 판단에 필요한 열을 앞쪽에 두고, 참고용인 담보코드·담보명은 맨 뒤에 둔다
+        show = ["상태", "특약코드", "특약명"] + LEVELS + ["신뢰도", "유사도"]
+        tail = ["이유", "담보코드", "담보명"]
+        hierarchy = st.session_state["models"]["_hierarchy"]
+        rows, kinds = [], []
         for _, r in result.iterrows():
-            rows.append(r[show])
+            why = explain_row(r, threshold, min_sim, hierarchy)
+            row = r[show].copy()
+            row["이유"] = " · ".join(text for _, _, text in why) or "—"
+            row["담보코드"], row["담보명"] = r["담보코드"], r["담보명"]
+            for col in ["대분류", "상세분류"]:
+                if str(row[col]).strip() == "":
+                    row[col] = "(비어 있음)"
+            rows.append(row)
+            k = {col: "" for col in show + tail}
+            k["중분류"] = k["소분류"] = "model"
+            for kind, cols, _ in why:
+                for col in cols:
+                    k[col] = kind
+            kinds.append(k)
             if r["상태"] == "동일 특약명(코드 상이)":
                 old = {"담보코드": r["담보코드"], "담보명": r["담보명"], "특약코드": r["기존_특약코드"],
-                       "특약명": r["특약명"], "신뢰도": None, "유사도": None,
-                       "상태": "기존 기준표(참고)"}
+                       "특약명": r["특약명"], "신뢰도": None, "유사도": None, "상태": "기존 기준표(참고)", "이유": ""}
                 old.update({lv: r["기존_" + lv] for lv in LEVELS})
-                rows.append(pd.Series(old)[show])
+                rows.append(pd.Series(old)[show + tail])
+                kinds.append({col: "ref" for col in show + tail})
         table = pd.DataFrame(rows).reset_index(drop=True)
-        st.dataframe(table.style.apply(color_review, axis=1),
-                     hide_index=True, width="stretch")
+        for col in ["신뢰도", "유사도"]:   # 기존 기준표 줄은 숫자가 없으므로 글자로 바꿔 빈 칸으로 보이게 한다
+            table[col] = pd.to_numeric(table[col], errors="coerce").map(lambda v: "" if pd.isna(v) else f"{v:.2f}")
+        kind_table = pd.DataFrame(kinds)
+
+        def paint(_):
+            css = kind_table.map(lambda k: KIND_STYLE.get(k, ""))
+            css["상태"] = table["상태"].map(lambda x: STATUS_TEXT.get(x, KIND_STYLE["ref"]))
+            return css
+
+        st.dataframe(
+            table.style.apply(paint, axis=None),
+            hide_index=True, width="stretch", height=min(36 * (len(table) + 1) + 3, 720),
+            column_config={   # 열 너비(픽셀): 판단에 필요한 열이 한 화면에 최대한 보이게 한다
+                "상태": st.column_config.Column("상태", width=150),
+                "특약코드": st.column_config.Column("특약코드", width=75),
+                "특약명": st.column_config.Column("특약명", width=220),
+                "대분류": st.column_config.Column("대분류 (입력)", width=95),
+                "중분류": st.column_config.Column("중분류 (추천)", width=100),
+                "소분류": st.column_config.Column("소분류 (추천)", width=100),
+                "상세분류": st.column_config.Column("상세분류 (입력)", width=110),
+                "신뢰도": st.column_config.Column("신뢰도", width=65),
+                "유사도": st.column_config.Column("유사도", width=65),
+                "이유": st.column_config.Column("이유", width=360),
+                "담보코드": st.column_config.Column("담보코드", width=80),
+                "담보명": st.column_config.Column("담보명", width=140)})
 
         with st.expander("정확도 확인 (정답지가 있을 때만)"):
             key_file = st.file_uploader("정답지 엑셀 (answer_key.xlsx)", type="xlsx", key="answer")
@@ -240,8 +305,10 @@ elif page == "③ 수정·승인":
             "승인": st.column_config.CheckboxColumn("승인"),
             "새 분류 확인": st.column_config.CheckboxColumn(
                 "새 분류 확인", help="기준표에 없는 중분류·소분류를 일부러 추가하는 경우에만 체크"),
-            "중분류": st.column_config.TextColumn("중분류 (새 값 입력 가능)"),
-            "소분류": st.column_config.TextColumn("소분류 (새 값 입력 가능)"),
+            "중분류": st.column_config.TextColumn("중분류 (추천·새 값 입력 가능)"),
+            "소분류": st.column_config.TextColumn("소분류 (추천·새 값 입력 가능)"),
+            "대분류": st.column_config.TextColumn("대분류 (입력·수정 불가)"),
+            "상세분류": st.column_config.TextColumn("상세분류 (입력·수정 불가)"),
         },
     )
     st.session_state["edited"] = edited
