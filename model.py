@@ -82,10 +82,23 @@ def classify(models, new_df, threshold=0.7, min_sim=0.8):
 
 
 def accuracy(result, answer):
-    """정답지와 비교해 중분류·소분류별 / 유형별 정확도를 계산한다. (특약코드로 맞춘다)"""
-    answer = answer[["특약코드"] + ["정답_" + lv for lv in PREDICT_LEVELS] + ["유형"]]
+    """정답지와 비교해 단계별 / 유형별 정확도를 계산한다. (특약코드로 맞춘다)
+    정답지에 있는 단계(정답_대분류 ~ 정답_상세분류)만 계산한다. 대분류·상세분류는 입력값을 그대로 쓰는 단계다.
+    반환: (단계별 정확도, 유형별 정확도, '신규 보장' 유형을 뺀 단계별 정확도)"""
+    levels = [lv for lv in LEVELS if "정답_" + lv in answer.columns]
+    answer = answer[["특약코드"] + ["정답_" + lv for lv in levels] + ["유형"]]
     merged = result.merge(answer, on="특약코드")
-    per_level = {lv: (merged[lv] == merged["정답_" + lv]).mean() for lv in PREDICT_LEVELS}
+
+    def per(df):
+        return {lv: (df[lv] == df["정답_" + lv]).mean() for lv in levels} if len(df) else {}
+
     merged["모두일치"] = (merged["중분류"] == merged["정답_중분류"]) & (merged["소분류"] == merged["정답_소분류"])
     by_type = merged.groupby("유형")["모두일치"].mean().to_dict()
-    return per_level, by_type
+    return per(merged), by_type, per(merged[merged["유형"] != "신규 보장"])
+
+
+def low_confidence_split(result, answer, threshold=0.7):
+    """'신규 보장' 유형 중 신뢰도가 기준 미만(=검토 필요로 분리된)인 건수. 반환: (신규 보장 건수, 분리된 건수)"""
+    merged = result.merge(answer[["특약코드", "유형"]], on="특약코드")
+    new = merged[merged["유형"] == "신규 보장"]
+    return len(new), int((new["신뢰도"] < threshold).sum())

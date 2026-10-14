@@ -164,14 +164,28 @@ def pick_approved(edited, hierarchy, master_codes, minors):
     return pd.DataFrame(ok), pd.DataFrame(skipped)
 
 
-def loss_ratio_by_major(perf, class_table):
-    """대분류별 손해율 집계. 손해율(%) = 보험금 합계 ÷ 위험보험료 합계 × 100 (평균의 평균이 아님).
-    class_table: 담보코드, 대분류 컬럼이 있는 표. 코드가 중복되면 뒤쪽 행을 쓴다."""
-    lookup = class_table.drop_duplicates("담보코드", keep="last")[["담보코드", "대분류"]]
-    df = perf.merge(lookup, on="담보코드", how="left")
-    df["대분류"] = df["대분류"].fillna("(분류 없음)")
+def attach_class(perf, class_table):
+    """실적에 분류(대>중>소>상세)를 붙인다. 실적에 '특약코드' 열이 있으면 4단계, '담보코드'만 있으면 대·중분류까지 붙인다.
+    분류가 없는 코드는 '(분류 없음)', 한 담보가 여러 분류에 걸쳐 있으면 '(여러 분류)'로 둔다.
+    반환: (분류가 붙은 실적, 사용한 단계 목록)"""
+    key, levels = ("특약코드", LEVELS) if "특약코드" in perf.columns else ("담보코드", LEVELS[:2])
+    df = perf.copy()
     for col in ["위험보험료", "보험금"]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    out = df.groupby("대분류", as_index=False)[["위험보험료", "보험금"]].sum()
+    table = class_table[[key] + levels].fillna("")
+    lookup = table.drop_duplicates(key, keep="last").set_index(key)
+    if key == "담보코드":
+        multi = table.groupby(key)[levels].nunique().max(axis=1) > 1
+        lookup.loc[multi[multi].index, levels] = "(여러 분류)"
+    df = df.join(lookup, on=key)
+    for lv in levels:
+        df[lv] = df[lv].fillna("(분류 없음)").replace("", "(미분류)")
+    return df, levels
+
+
+def sum_ratio(df, levels):
+    """levels 단계별로 위험보험료·보험금을 합산하고 손해율(%) = 보험금 합계 ÷ 위험보험료 합계 × 100 을 계산한다.
+    (평균의 평균이 아니라 합계로 계산한다)"""
+    out = df.groupby(levels, as_index=False, sort=False)[["위험보험료", "보험금"]].sum()
     out["손해율(%)"] = (out["보험금"] / out["위험보험료"].where(out["위험보험료"] > 0) * 100).round(1)
     return out.sort_values("위험보험료", ascending=False).reset_index(drop=True)

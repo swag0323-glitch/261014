@@ -148,11 +148,13 @@ def main(pdf, first, last, out_dir):
     by_core = {}
     for n in names:
         by_core.setdefault(core_of(n), []).append(n)
-    new_names = {n: "신규 보장" for c in new_cores for n in by_core.get(c, [])}
+    exclude = {n for c in new_cores for n in by_core.get(c, [])}          # 신규 보장 종류는 기준표에서 모두 뺀다
+    new_names = {by_core[c][0]: "신규 보장" for c in new_cores if c in by_core}   # 신규 특약에는 종류별 1건만 넣는다
     variant_cores = [c for c, v in by_core.items() if len(v) >= 3 and c not in new_cores]
-    for c in variant_cores[::max(1, len(variant_cores) // 17)][:17]:
+    pick = variant_cores[::max(1, len(variant_cores) // 20)][:20]
+    for c in pick:
         new_names[by_core[c][-1]] = "표기 변형"
-    master_names = [n for n in names if n not in new_names]
+    master_names = [n for n in names if n not in new_names and n not in exclude]
     same_names = master_names[3::max(1, len(master_names) // 5)][:5]    # 동일 특약명(코드 상이) 시험용
 
     # 담보는 (대분류, 중분류) 단위로 묶는다
@@ -197,9 +199,9 @@ def main(pdf, first, last, out_dir):
         c, cn = cov_of(major, middle)
         code = f"TK{9000 + k}"
         new_rows.append([c, cn, code, n, major, detail])
-        key_rows.append([c, cn, code, n, middle, minor, kind])
+        key_rows.append([c, cn, code, n, major, middle, minor, detail, kind])
     newdf = pd.DataFrame(new_rows, columns=mcols)
-    key = pd.DataFrame(key_rows, columns=["담보코드", "담보명", "특약코드", "특약명", "정답_중분류", "정답_소분류", "유형"])
+    key = pd.DataFrame(key_rows, columns=["담보코드", "담보명", "특약코드", "특약명", "정답_대분류", "정답_중분류", "정답_소분류", "정답_상세분류", "유형"])
 
     # 담보별 실적
     base = {"질병": .62, "상해": .55, "사망": .48, "기타": .30}
@@ -210,6 +212,19 @@ def main(pdf, first, last, out_dir):
             perf.append([f"2026{mon:02d}", c, int(rng.integers(5, 150)), prem,
                          int(prem * np.clip(base[major] + rng.normal(0, .12), .1, 1.2))])
     perf = pd.DataFrame(perf, columns=["기준월", "담보코드", "신계약건수", "위험보험료", "보험금"])
+
+    # 특약 단위 실적: 정상 분류 행(오류 행 제외)과 신규 특약 모두
+    ok_rows = master[~master["특약코드"].isin([f"TK{8000 + k}" for k in range(1, 6)])]
+    codes = list(ok_rows["특약코드"]) + list(newdf["특약코드"])
+    major_of = dict(zip(ok_rows["특약코드"], ok_rows["대분류"])) | dict(zip(newdf["특약코드"], newdf["대분류"]))
+    perf_tk = []
+    for code in codes:
+        for mon in range(1, 7):
+            prem = int(rng.integers(120_000, 520_000))
+            perf_tk.append([f"2026{mon:02d}", code, int(rng.integers(1, 40)), prem,
+                            int(prem * np.clip(base[major_of[code]] + rng.normal(0, .22), .05, 1.6))])
+    perf_tk = pd.DataFrame(perf_tk, columns=["기준월", "특약코드", "신계약건수", "위험보험료", "보험금"])
+    perf_tk.to_excel(out / "coverage_perf_special.xlsx", index=False, sheet_name="실적(특약)")
 
     with pd.ExcelWriter(out / "coverage_master.xlsx") as w:
         master.to_excel(w, sheet_name="기준표", index=False)
