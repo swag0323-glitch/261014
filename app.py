@@ -30,6 +30,10 @@ if st.session_state["models"] is None and not st.session_state.get("autoload_don
             st.session_state.update(master=master, models=models, checked=checked,
                                     loaded_from=latest.parent.name)
 
+# 다른 화면으로 갔다 와도 슬라이더 값이 남도록 매번 다시 저장해 둔다 (처음에는 기본값)
+for key, default in [("threshold", 0.7), ("min_sim", 0.8)]:
+    st.session_state[key] = st.session_state.get(key, default)
+
 page = st.sidebar.radio(
     "메뉴", ["① 기준표 업로드·학습", "② 신규 특약 분류", "③ 수정·승인", "④ 반영·다운로드", "⑤ 손해율 집계(선택)"]
 )
@@ -65,12 +69,19 @@ if page == "① 기준표 업로드·학습":
         st.warning(f"이력 폴더의 최근 버전({st.session_state['old_history']})은 예전 열 구성이라 자동으로 불러오지 않았습니다. "
                    "아래에서 새 기준표를 업로드하세요.")
     file = st.file_uploader("기준표 엑셀 (coverage_master.xlsx, 첫 번째 시트 사용)", type="xlsx")
-    if file:
+    if file and st.session_state.get("pending_id") != file.file_id:
         master = read_master(file)
         lack = missing_columns(master, MASTER_COLS)
         if lack:
             st.error(f"기준표에 없는 열이 있습니다: {', '.join(lack)}  (필요한 열: {', '.join(MASTER_COLS)})")
             st.stop()
+        # 화면을 옮겨도 남도록 업로드한 기준표를 보관한다
+        st.session_state.update(pending_master=master, pending_name=file.name, pending_id=file.file_id)
+        st.session_state.pop("train_msg", None)
+
+    master = st.session_state.get("pending_master")
+    if master is not None:
+        st.caption(f"업로드한 기준표: {st.session_state['pending_name']} (화면을 옮겨도 유지됩니다)")
         # 학습 전에 검사만 먼저 해서 건수를 보여준다
         checked = check_master(master)
         counts = checked["상태"].value_counts()
@@ -90,7 +101,9 @@ if page == "① 기준표 업로드·학습":
             st.session_state["master"] = master
             st.session_state["models"] = models
             st.session_state["checked"] = checked
-            st.success(f"학습 완료! ({(checked['상태'] == '정상').sum()}건으로 학습했습니다)")
+            st.session_state["train_msg"] = f"학습 완료! ({(checked['상태'] == '정상').sum()}건으로 학습했습니다)"
+    if st.session_state.get("train_msg"):
+        st.success(st.session_state["train_msg"])
     elif st.session_state["models"] is not None:
         st.info("이미 학습된 모델이 있습니다. 다시 학습하려면 기준표를 업로드하세요.")
 
@@ -110,11 +123,14 @@ elif page == "② 신규 특약 분류":
             st.stop()
         st.session_state["new_df"] = new_df
         st.session_state["new_file_id"] = file.file_id
+        st.session_state["new_file_name"] = file.name
         st.session_state.pop("edit_base", None)  # 새 파일이면 ③의 수정 내용 초기화
         st.session_state.pop("editor", None)
+    if st.session_state["new_df"] is not None:
+        st.caption(f"업로드한 신규 특약: {st.session_state.get('new_file_name', '')} (화면을 옮겨도 유지됩니다)")
     c1, c2 = st.columns(2)
-    threshold = c1.slider("신뢰도 기준 (이 값 이상이면 자동 분류)", 0.0, 1.0, 0.7, 0.05)
-    min_sim = c2.slider("기준표와의 유사도 기준 (이 값 미만이면 검토 필요)", 0.0, 1.0, 0.8, 0.05,
+    threshold = c1.slider("신뢰도 기준 (이 값 이상이면 자동 분류)", 0.0, 1.0, step=0.05, key="threshold")
+    min_sim = c2.slider("기준표와의 유사도 기준 (이 값 미만이면 검토 필요)", 0.0, 1.0, step=0.05, key="min_sim",
                         help="기준표에 없던 표현이 많은 특약은 신뢰도가 높아도 사람이 확인하도록 합니다.")
 
     new_df = st.session_state["new_df"]
@@ -144,7 +160,9 @@ elif page == "② 신규 특약 분류":
         with st.expander("정확도 확인 (정답지가 있을 때만)"):
             key_file = st.file_uploader("정답지 엑셀 (answer_key.xlsx)", type="xlsx", key="answer")
             if key_file:
-                per_level, by_type = accuracy(result, pd.read_excel(key_file, dtype=str))
+                st.session_state["answer_df"] = pd.read_excel(key_file, dtype=str)
+            if st.session_state.get("answer_df") is not None:
+                per_level, by_type = accuracy(result, st.session_state["answer_df"])
                 st.write("**단계별 정확도**")
                 st.table(pd.Series(per_level, name="정확도").map("{:.1%}".format))
                 st.write("**유형별 정확도 (중분류·소분류 모두 일치 기준)**")
@@ -308,7 +326,9 @@ else:
 
     file = st.file_uploader("담보별 실적 엑셀 (coverage_perf.xlsx)", type="xlsx")
     if file:
-        perf = pd.read_excel(file, dtype={"기준월": str, "담보코드": str})
+        st.session_state["perf_df"] = pd.read_excel(file, dtype={"기준월": str, "담보코드": str})
+    if st.session_state.get("perf_df") is not None:
+        perf = st.session_state["perf_df"]
         # 기준표 분류를 바탕으로, ③에서 수정한 신규 특약 분류가 있으면 그것을 우선한다
         table = st.session_state["master"][["담보코드", "대분류"]]
         edited = st.session_state.get("edited")
