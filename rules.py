@@ -88,3 +88,16 @@ def pick_approved(edited, hierarchy, master_codes):
             continue
         skipped.append({**r.to_dict(), "건너뛴 사유": reason})
     return pd.DataFrame(ok), pd.DataFrame(skipped)
+
+
+def loss_ratio_by_major(perf, class_table):
+    """대분류별 손해율 집계. 손해율(%) = 보험금 합계 ÷ 위험보험료 합계 × 100 (평균의 평균이 아님).
+    class_table: 담보코드, 대분류 컬럼이 있는 표. 코드가 중복되면 뒤쪽 행을 쓴다."""
+    lookup = class_table.drop_duplicates("담보코드", keep="last")[["담보코드", "대분류"]]
+    df = perf.merge(lookup, on="담보코드", how="left")
+    df["대분류"] = df["대분류"].fillna("(분류 없음)")
+    for col in ["위험보험료", "보험금"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    out = df.groupby("대분류", as_index=False)[["위험보험료", "보험금"]].sum()
+    out["손해율(%)"] = (out["보험금"] / out["위험보험료"].where(out["위험보험료"] > 0) * 100).round(1)
+    return out.sort_values("위험보험료", ascending=False).reset_index(drop=True)

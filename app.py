@@ -5,7 +5,7 @@ import streamlit as st
 from model import read_master, train, classify, accuracy
 from io import BytesIO
 
-from rules import LEVELS, check_master, check_same_name, pick_approved
+from rules import LEVELS, check_master, check_same_name, pick_approved, loss_ratio_by_major
 
 st.set_page_config(page_title="신규 담보 자동 분류 도구", layout="wide")
 st.title("신규 담보 자동 분류 도구")
@@ -15,7 +15,7 @@ for key in ["master", "checked", "models", "new_df", "new_file_id"]:
     st.session_state.setdefault(key, None)
 
 page = st.sidebar.radio(
-    "메뉴", ["① 기준표 업로드·학습", "② 신규 담보 분류", "③ 수정·승인", "④ 반영·다운로드"]
+    "메뉴", ["① 기준표 업로드·학습", "② 신규 담보 분류", "③ 수정·승인", "④ 반영·다운로드", "⑤ 손해율 집계(선택)"]
 )
 
 
@@ -164,7 +164,7 @@ elif page == "③ 수정·승인":
     st.write(f"승인 **{int(edited['승인'].sum())}건** / 전체 {len(edited)}건")
 
 # ---------- ④ 반영·다운로드 ----------
-else:
+elif page == "④ 반영·다운로드":
     st.header("④ 반영·다운로드")
     edited = st.session_state.get("edited")
     if edited is None:
@@ -201,3 +201,31 @@ else:
                        file_name="classification_result.xlsx")
     c2.download_button("갱신된 기준표", to_excel(st.session_state["master"], "기준표"),
                        file_name="coverage_master_updated.xlsx")
+
+# ---------- ⑤ 손해율 집계 (선택) ----------
+else:
+    st.header("⑤ 손해율 집계 (선택)")
+    if st.session_state["master"] is None:
+        st.warning("먼저 ① 화면에서 기준표를 올리고 학습해 주세요.")
+        st.stop()
+
+    file = st.file_uploader("담보별 실적 엑셀 (coverage_perf.xlsx)", type="xlsx")
+    if file:
+        perf = pd.read_excel(file, dtype={"기준월": str, "담보코드": str})
+        # 기준표 분류를 바탕으로, ③에서 수정한 신규 담보 분류가 있으면 그것을 우선한다
+        table = st.session_state["master"][["담보코드", "대분류"]]
+        edited = st.session_state.get("edited")
+        if edited is not None:
+            table = pd.concat([table, edited[["담보코드", "대분류"]]], ignore_index=True)
+
+        months = sorted(perf["기준월"].unique())
+        picked = st.multiselect("기준월", months, default=months)
+        perf = perf[perf["기준월"].isin(picked)]
+
+        out = loss_ratio_by_major(perf, table)
+        total = out["보험금"].sum() / out["위험보험료"].sum() * 100 if out["위험보험료"].sum() else 0
+        st.metric("전체 손해율", f"{total:.1f}%")
+        st.dataframe(out.style.format({"위험보험료": "{:,.0f}", "보험금": "{:,.0f}", "손해율(%)": "{:.1f}"}),
+                     hide_index=True, width="stretch")
+        st.bar_chart(out.set_index("대분류")["손해율(%)"])
+        st.caption("손해율 = 대분류별 보험금 합계 ÷ 위험보험료 합계 × 100 (평균의 평균이 아닙니다)")
