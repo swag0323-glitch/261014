@@ -14,10 +14,11 @@ def missing_columns(df, cols):
 
 
 def clean_name(name):
-    """특약명 전처리: 괄호 문구, 공백, Ⅱ/Ⅲ, 플러스, 특약, N종 제거 + 진단금→진단비."""
+    """특약명 전처리: 괄호 문구, 맨 앞 R, 공백, Ⅱ/Ⅲ, 플러스, 특약, N종 제거 + 진단금→진단비."""
     s = str(name)
     s = re.sub(r"\([^)]*\)|（[^）]*）", "", s)   # 괄호 안 문구 제거
     s = re.sub(r"\d+종", "", s)                  # N종 제거
+    s = re.sub(r"^R", "", s)                     # 판매 형태 표기 'R(무)'의 앞머리 R 제거
     for word in ["Ⅱ", "Ⅲ", "플러스", "특약"]:
         s = s.replace(word, "")
     s = re.sub(r"\s+", "", s)                    # 공백 제거
