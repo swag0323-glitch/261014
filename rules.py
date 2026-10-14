@@ -5,7 +5,7 @@ import pandas as pd
 LEVELS = ["대분류", "중분류", "소분류", "상세분류"]
 PREDICT_LEVELS = ["중분류", "소분류"]   # 모델이 예측하는 단계 (대분류·상세분류는 입력에 이미 있다)
 INPUT_COLS = ["담보코드", "담보명", "특약코드", "특약명", "대분류", "상세분류"]   # 신규 특약 파일의 열
-MASTER_COLS = ["담보코드", "담보명", "특약코드", "특약명", "대분류", "중분류", "소분류", "상세분류"]   # 기준표의 열
+MASTER_COLS = ["담보코드", "담보명", "특약코드", "특약명", "대분류", "중분류", "소분류", "상세분류"]   # 기존 특약분류표의 열
 
 
 def missing_columns(df, cols):
@@ -31,25 +31,25 @@ def bigrams(text):
 
 
 def name_similarity(name, known):
-    """신규 특약명의 글자 조각 중 기준표에도 있던 비율 (0~1). 낮을수록 기준표에 없던 새 표현이다."""
+    """신규 특약명의 글자 조각 중 기존 특약분류표에도 있던 비율 (0~1). 낮을수록 기존 특약분류표에 없던 새 표현이다."""
     pieces = bigrams(clean_name(name))
     return round(len(pieces & known) / len(pieces), 3) if pieces else 0.0
 
 
 def unknown_pieces(name, known):
-    """신규 특약명의 글자 조각(두 글자씩) 중 기준표에 없던 것을 순서대로 돌려준다."""
+    """신규 특약명의 글자 조각(두 글자씩) 중 기존 특약분류표에 없던 것을 순서대로 돌려준다."""
     text = clean_name(name)
     pieces = [text[i:i + 2] for i in range(len(text) - 1)]
     return [p for p in dict.fromkeys(pieces) if p not in known], len(set(pieces))
 
 
 def is_new_class(row, hierarchy, minors):
-    """중분류나 소분류가 기준표에 없던 값이면 '새 분류'."""
+    """중분류나 소분류가 기존 특약분류표에 없던 값이면 '새 분류'."""
     return row["중분류"] not in hierarchy or row["소분류"] not in minors
 
 
 def build_hierarchy(master):
-    """기준표에서 '중분류 → 대분류' 관계를 만든다.
+    """기존 특약분류표에서 '중분류 → 대분류' 관계를 만든다.
     같은 중분류가 가장 많이 속한 대분류를 정상 부모로 본다 (소수 오입력은 오류로 간주)."""
     ok = master.dropna(subset=["대분류", "중분류"])
     ok = ok[(ok["대분류"].str.strip() != "") & (ok["중분류"].str.strip() != "")]
@@ -64,7 +64,7 @@ def is_child(hierarchy, major, middle):
 
 
 def check_master(master):
-    """기준표 검사: 각 행에 상태 컬럼을 붙여 돌려준다 (정상 / 누락 / 계층 오류)."""
+    """기존 특약분류표 검사: 각 행에 상태 컬럼을 붙여 돌려준다 (정상 / 누락 / 계층 오류)."""
     df = master.copy()
     for col in LEVELS:
         df[col] = df[col].fillna("").astype(str).str.strip()
@@ -82,8 +82,8 @@ def check_master(master):
 
 
 def check_same_name(result, checked_master):
-    """신규 특약 중 특약명이 기준표에 이미 있는데 특약코드가 다르면 '동일 특약명(코드 상이)'으로 표시.
-    기준표의 기존 분류를 '기존_대분류' 등 컬럼으로 함께 붙이고, 중·소분류 예측이 기존과 같은지 비교한다."""
+    """신규 특약 중 특약명이 기존 특약분류표에 이미 있는데 특약코드가 다르면 '동일 특약명(코드 상이)'으로 표시.
+    기존 특약분류표의 분류를 '기존_대분류' 등 컬럼으로 함께 붙이고, 중·소분류 예측이 기존과 같은지 비교한다."""
     out = result.copy()
     # 정상 행을 먼저 두어, 같은 이름이 여러 개면 정상 행의 분류를 보여준다
     base = checked_master.assign(_ord=(checked_master["상태"] != "정상"))
@@ -117,16 +117,16 @@ def explain_row(r, threshold, min_sim, hierarchy):
         out.append(("hier", ["대분류", "중분류"], f'{r["중분류"]}은(는) {r["대분류"]}의 하위가 아님'))
     if r["상태"] == "동일 특약명(코드 상이)":
         out.append(("dup", ["특약코드", "특약명"],
-                    f'기준표 {r["기존_특약코드"]}와 특약명 동일 ({r["기존_중분류"]}/{r["기존_소분류"]}/{r["기존_상세분류"]})'))
+                    f'기존 특약분류표 {r["기존_특약코드"]}와 특약명 동일 ({r["기존_중분류"]}/{r["기존_소분류"]}/{r["기존_상세분류"]})'))
         if r["기존 분류 비교"] == "기존과 다름":
             cols = [lv for lv in PREDICT_LEVELS if r[lv] != r["기존_" + lv]]
             out.append(("diff", cols, "예측이 기존 분류와 다름"))
     # 신규 보장 가능성 → 처음 보는 표현(유사도) → 신뢰도 순서로, 원인에서 결과 쪽으로 적는다
     if r.get("상세분류_신규"):
-        out.append(("new", ["상세분류"], f"신규 보장 가능성: 기준표에 없는 상세분류 '{r['상세분류']}'"))
+        out.append(("new", ["상세분류"], f"신규 보장 가능성: 기존 특약분류표에 없는 상세분류 '{r['상세분류']}'"))
     if r["유사도"] < min_sim:
         n, lack = int(r.get("조각수", 0)), [t for t in str(r.get("낯선조각", "")).split(",") if t]
-        text = f'유사도 {r["유사도"]:.2f}: 글자 조각 {n}개 중 {n - len(lack)}개만 기준표에 있음'
+        text = f'유사도 {r["유사도"]:.2f}: 글자 조각 {n}개 중 {n - len(lack)}개만 기존 특약분류표에 있음'
         if lack:
             text += f' (처음 보는 조각: {", ".join(lack)})'
         out.append(("sim", ["유사도"], text))
@@ -142,8 +142,8 @@ def explain_row(r, threshold, min_sim, hierarchy):
 
 
 def pick_approved(edited, hierarchy, master_codes, minors):
-    """승인된 행을 기준표에 넣을 행과 건너뛸 행(사유 포함)으로 나눈다.
-    기준표에 없던 새 분류(중분류·소분류)는 '새 분류 확인'에 체크한 행만 반영한다."""
+    """승인된 행을 기존 특약분류표에 넣을 행과 건너뛸 행(사유 포함)으로 나눈다.
+    기존 특약분류표에 없던 새 분류(중분류·소분류)는 '새 분류 확인'에 체크한 행만 반영한다."""
     ok, skipped = [], []
     for _, r in edited[edited["승인"]].iterrows():
         new_class = is_new_class(r, hierarchy, minors)
@@ -154,9 +154,9 @@ def pick_approved(edited, hierarchy, master_codes, minors):
         elif not new_class and not is_child(hierarchy, r["대분류"], r["중분류"]):
             reason = "계층 오류 (중분류가 대분류의 하위가 아님)"
         elif r["상태"] == "동일 특약명(코드 상이)":
-            reason = "동일 특약명 (기준표에 이미 있음)"
+            reason = "동일 특약명 (기존 특약분류표에 이미 있음)"
         elif r["특약코드"] in master_codes:
-            reason = "이미 기준표에 있는 특약코드"
+            reason = "이미 기존 특약분류표에 있는 특약코드"
         else:
             ok.append(r)
             continue
