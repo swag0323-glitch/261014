@@ -109,7 +109,8 @@ def explain_row(r, threshold, min_sim, hierarchy):
     if str(r["대분류"]).strip() and not is_child(hierarchy, r["대분류"], r["중분류"]):
         out.append(("hier", ["대분류", "중분류"], f'{r["중분류"]}은(는) {r["대분류"]}의 하위가 아님'))
     if r["상태"] == "동일 특약명(코드 상이)":
-        out.append(("dup", ["특약코드", "특약명"], f'기준표 {r["기존_특약코드"]}와 특약명 동일'))
+        out.append(("dup", ["특약코드", "특약명"],
+                    f'기준표 {r["기존_특약코드"]}와 특약명 동일 ({r["기존_중분류"]}/{r["기존_소분류"]}/{r["기존_상세분류"]})'))
         if r["기존 분류 비교"] == "기존과 다름":
             cols = [lv for lv in PREDICT_LEVELS if r[lv] != r["기존_" + lv]]
             out.append(("diff", cols, "예측이 기존 분류와 다름"))
@@ -129,7 +130,7 @@ def pick_approved(edited, hierarchy, master_codes, minors):
         if any(str(r[c]).strip() == "" for c in LEVELS):
             reason = "누락 (4단계 중 빈 칸이 있음)"
         elif new_class and not r.get("새 분류 확인", False):
-            reason = "새 분류 (③에서 '새 분류 확인'을 체크해야 반영)"
+            reason = "새 분류 (②에서 '새 분류 확인'을 체크해야 반영)"
         elif not new_class and not is_child(hierarchy, r["대분류"], r["중분류"]):
             reason = "계층 오류 (중분류가 대분류의 하위가 아님)"
         elif r["상태"] == "동일 특약명(코드 상이)":

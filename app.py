@@ -31,10 +31,10 @@ if st.session_state["models"] is None and not st.session_state.get("autoload_don
                                     loaded_from=latest.parent.name)
 
 # 다른 화면으로 갔다 와도 슬라이더 값이 남도록 매번 다시 저장해 둔다 (처음에는 기본값)
-for key, default in [("threshold", 0.7), ("min_sim", 0.8)]:
+for key, default in [("threshold", 0.7), ("min_sim", 0.8), ("approve_auto", True)]:
     st.session_state[key] = st.session_state.get(key, default)
 
-PAGES = ["① 기준표 업로드·학습", "② 신규 특약 분류", "③ 수정·승인", "④ 반영·다운로드", "⑤ 손해율 집계(선택)"]
+PAGES = ["① 기준표 업로드·학습", "② 분류·수정·승인", "③ 반영·다운로드", "④ 손해율 집계(선택)"]
 st.session_state.setdefault("page", PAGES[0])
 
 
@@ -54,6 +54,18 @@ def nav_buttons():
         left.button(f"← 이전: {PAGES[i - 1]}", on_click=go_to, args=(PAGES[i - 1],), key="nav_prev")
     if i < len(PAGES) - 1:
         right.button(f"다음: {PAGES[i + 1]} →", on_click=go_to, args=(PAGES[i + 1],), type="primary", key="nav_next")
+
+
+def commit_edits():
+    """수정 표에서 고친 내용을 edit_base에 합쳐 저장한다 (다른 화면에 갔다 와도 고친 내용이 남도록)."""
+    base, state = st.session_state.get("edit_base"), st.session_state.get("editor")
+    if base is not None and state:
+        base = base.copy()
+        for row, changes in state.get("edited_rows", {}).items():
+            for col, value in changes.items():
+                base.at[int(row), col] = value
+        st.session_state["edit_base"] = base
+    st.session_state.pop("editor", None)
 
 
 def finish():
@@ -140,8 +152,8 @@ if page == "① 기준표 업로드·학습":
         st.info("이미 학습된 모델이 있습니다. 다시 학습하려면 기준표를 업로드하세요.")
 
 # ---------- ② 신규 특약 분류 ----------
-elif page == "② 신규 특약 분류":
-    st.header("② 신규 특약 분류")
+elif page == "② 분류·수정·승인":
+    st.header("② 분류·수정·승인")
     if st.session_state["models"] is None:
         st.warning("먼저 ① 화면에서 기준표를 올리고 학습해 주세요.")
         finish()
@@ -156,8 +168,8 @@ elif page == "② 신규 특약 분류":
         st.session_state["new_df"] = new_df
         st.session_state["new_file_id"] = file.file_id
         st.session_state["new_file_name"] = file.name
-        st.session_state.pop("edit_base", None)  # 새 파일이면 ③의 수정 내용 초기화
-        st.session_state.pop("editor", None)
+        for key in ["edit_base", "edit_sig", "edit_orig", "editor"]:   # 새 파일이면 수정 내용 초기화
+            st.session_state.pop(key, None)
     if st.session_state["new_df"] is not None:
         st.caption(f"업로드한 신규 특약: {st.session_state.get('new_file_name', '')} (화면을 옮겨도 유지됩니다)")
     c1, c2 = st.columns(2)
@@ -165,10 +177,12 @@ elif page == "② 신규 특약 분류":
     min_sim = c2.slider("기준표와의 유사도 기준 (이 값 미만이면 검토 필요)", 0.0, 1.0, step=0.05, key="min_sim",
                         help="기준표에 없던 표현이 많은 특약은 신뢰도가 높아도 사람이 확인하도록 합니다.")
 
+    commit_edits()   # 지난번에 표에서 고친 내용을 먼저 저장해 둔다
+
     new_df = st.session_state["new_df"]
     if new_df is not None:
         result = classify(st.session_state["models"], new_df, threshold, min_sim)
-        result = sort_by_status(check_same_name(result, st.session_state["checked"]))
+        result = sort_by_status(check_same_name(result, st.session_state["checked"])).reset_index(drop=True)
         st.session_state["result"] = result
 
         counts = result["상태"].value_counts()
@@ -180,7 +194,7 @@ elif page == "② 신규 특약 분류":
                 "| **자동 분류** | 신뢰도와 유사도가 모두 기준 이상 | 대체로 그대로 승인 |\n"
                 "| **검토 필요** | 신뢰도나 유사도가 기준 미만, 또는 입력의 대분류·상세분류가 비어 있음 | 추천값을 확인하고 필요하면 수정 |\n"
                 "| **계층 불일치** | 추천한 중분류가 입력된 대분류의 하위가 아님 | 중분류나 대분류를 고침 |\n"
-                "| **동일 특약명(코드 상이)** | 기준표에 같은 특약명이 있는데 특약코드가 다름 | 중복 등록인지 확인 (기존 분류가 아래 줄에 표시됨) |\n")
+                "| **동일 특약명(코드 상이)** | 기준표에 같은 특약명이 있는데 특약코드가 다름 | 중복 등록인지 확인 (기존 분류가 이유에 표시됨) |\n")
             st.markdown(
                 "- **입력**: 파일에 있던 값(특약코드·특약명·대분류·상세분류). **추천**: 중분류·소분류는 입력 파일에 없는 값이고, "
                 "기준표로 학습한 모델이 계산한 추천값입니다 (연한 남색 바탕).\n"
@@ -194,6 +208,8 @@ elif page == "② 신규 특약 분류":
                     ("diff", "기존과 다름"), ("miss", "입력 비어 있음"), ("model", "모델 추천값")]),
                 unsafe_allow_html=True)
 
+        # ---------- 위: 전체 분류 결과 (읽기 전용) ----------
+        st.subheader("전체 분류 결과 (추천값 포함, 읽기 전용)")
         # 이유가 있는 칸만 색칠한다. 동일 특약명이면 그 행 바로 아래에 기준표의 기존 행(회색)을 끼워 넣는다
         # 판단에 필요한 열을 앞쪽에 두고, 참고용인 담보코드·담보명은 맨 뒤에 둔다
         show = ["상태", "특약코드", "특약명"] + LEVELS + ["신뢰도", "유사도"]
@@ -248,6 +264,120 @@ elif page == "② 신규 특약 분류":
                 "담보코드": st.column_config.Column("담보코드", width=80),
                 "담보명": st.column_config.Column("담보명", width=140)})
 
+        # ---------- 아래: 자동 분류가 아닌 행만 고쳐서 승인 ----------
+        st.subheader("확인이 필요한 행 수정·승인")
+        hierarchy = st.session_state["models"]["_hierarchy"]
+        auto_mask = result["상태"] == "자동 분류"
+        review = result[~auto_mask].reset_index(drop=True)
+        editor_cols = (["승인", "새 분류 확인", "상태", "특약코드", "특약명"] + LEVELS
+                       + ["신뢰도", "유사도", "이유", "담보코드", "담보명", "동일한 기존 특약코드", "기존 분류 비교"])
+
+        # 자동 분류가 아닌 행이 바뀌었거나 기준 슬라이더가 바뀌면 수정 표를 새로 만든다
+        sig = (tuple(review["특약코드"]), threshold, min_sim)
+        if st.session_state.get("edit_sig") != sig:
+            base = review.rename(columns={"기존_특약코드": "동일한 기존 특약코드"}).copy()
+            base["이유"] = [" · ".join(t for _, _, t in explain_row(r, threshold, min_sim, hierarchy)) or "—"
+                           for _, r in review.iterrows()]
+            base["승인"], base["새 분류 확인"] = False, False
+            base = base[editor_cols]
+            st.session_state.update(edit_base=base, edit_orig=base.copy(), edit_sig=sig)
+            st.session_state.pop("editor", None)
+
+        def set_approval(kind):
+            """승인 칸을 전체 선택 / 전체 해제한다. 고친 분류 내용은 그대로 둔다."""
+            commit_edits()
+            current = st.session_state["edit_base"].copy()
+            current["승인"] = kind == "all"
+            st.session_state["edit_base"] = current
+
+        n_auto = int(auto_mask.sum())
+        b1, b2, b3, _ = st.columns([1, 1, 2.6, 4])
+        b1.button("전체 선택", on_click=set_approval, args=("all",))
+        b2.button("전체 해제", on_click=set_approval, args=("none",))
+        b3.checkbox(f"자동 분류 {n_auto}건도 함께 승인", key="approve_auto",
+                    help="끄면 자동 분류 행은 승인되지 않아 기준표에 반영되지 않습니다.")
+
+        if len(review) == 0:
+            st.success("확인이 필요한 행이 없습니다. 모두 자동 분류입니다.")
+            edited_review = st.session_state["edit_base"]
+        else:
+            st.caption("연필 모양이 붙은 열(승인·새 분류 확인·중분류·소분류)만 고칠 수 있습니다. "
+                       "승인한 행만 기준표에 반영되고, 기준표에 없는 새 값이면 '새 분류 확인'도 체크해야 합니다. "
+                       "수정 가능한 칸은 표 기능상 색이 칠해지지 않아, 읽기 전용 칸과 '이유' 열로 알립니다.")
+            # 읽기 전용 칸만 색칠한다 (수정 가능한 칸은 색이 적용되지 않는다)
+            kinds = pd.DataFrame("", index=range(len(review)), columns=editor_cols)
+            for n, (_, r) in enumerate(review.iterrows()):
+                for kind, cols, _ in explain_row(r, threshold, min_sim, hierarchy):
+                    for col in cols:
+                        col = "대분류" if col == "중분류" else col      # 계층 불일치는 대분류 칸으로 알린다
+                        col = "이유" if kind == "diff" else col         # 기존과 다름은 이유 칸으로 알린다
+                        if col in kinds.columns:
+                            kinds.at[n, col] = kind
+
+            def paint_edit(_):
+                css = kinds.map(lambda k: KIND_STYLE.get(k, ""))
+                css["상태"] = st.session_state["edit_base"]["상태"].map(lambda x: STATUS_TEXT.get(x, ""))
+                return css
+
+            base = st.session_state["edit_base"]
+            edited_review = st.data_editor(
+                base.style.apply(paint_edit, axis=None), key="editor", hide_index=True, width="stretch",
+                height=min(36 * (len(base) + 1) + 3, 520),
+                disabled=["상태", "특약코드", "특약명", "대분류", "상세분류", "신뢰도", "유사도", "이유", "담보코드", "담보명",
+                          "동일한 기존 특약코드", "기존 분류 비교"],
+                column_config={
+                    "승인": st.column_config.CheckboxColumn("승인", width=75),
+                    "새 분류 확인": st.column_config.CheckboxColumn(
+                        "새 분류 확인", width=115, help="기준표에 없는 중분류·소분류를 일부러 추가하는 경우에만 체크"),
+                    "상태": st.column_config.Column("상태", width=150),
+                    "특약코드": st.column_config.Column("특약코드", width=75),
+                    "특약명": st.column_config.Column("특약명", width=220),
+                    "대분류": st.column_config.TextColumn("대분류 (입력)", width=100),
+                    "중분류": st.column_config.TextColumn("중분류 (추천)", width=115),
+                    "소분류": st.column_config.TextColumn("소분류 (추천)", width=115),
+                    "상세분류": st.column_config.TextColumn("상세분류 (입력)", width=115),
+                    "신뢰도": st.column_config.NumberColumn("신뢰도", format="%.2f", width=65),
+                    "유사도": st.column_config.NumberColumn("유사도", format="%.2f", width=65),
+                    "이유": st.column_config.Column("이유", width=360),
+                    "담보코드": st.column_config.Column("담보코드", width=80),
+                    "담보명": st.column_config.Column("담보명", width=140),
+                })
+
+            # 고친 내용 목록 (원래 추천값과 비교)
+            orig = st.session_state["edit_orig"]
+            changes = [f"{orig.at[i, '특약코드']} {col}: {orig.at[i, col]} → {edited_review.at[i, col]}"
+                       for i in range(len(orig)) for col in ["중분류", "소분류"]
+                       if orig.at[i, col] != edited_review.at[i, col]]
+            if changes:
+                st.info("**고친 내용** (위 표의 추천값과 비교)  \n" + "  \n".join(changes))
+
+        # ---- 위·아래 표를 합쳐 반영 화면(③)에 넘길 최종 표를 만든다 ----
+        final_cols = (["상태", "승인", "새 분류 확인", "특약코드", "특약명", "담보코드", "담보명"] + LEVELS
+                      + ["신뢰도", "유사도", "동일한 기존 특약코드", "기존 분류 비교"])
+        final = result.rename(columns={"기존_특약코드": "동일한 기존 특약코드"}).copy()
+        final["승인"] = bool(st.session_state["approve_auto"]) & auto_mask
+        final["새 분류 확인"] = False
+        idx = final.index[~auto_mask]
+        for col in ["승인", "새 분류 확인", "중분류", "소분류"]:
+            final.loc[idx, col] = edited_review[col].tolist()
+        final["승인"] = final["승인"].astype(bool)
+        final["새 분류 확인"] = final["새 분류 확인"].astype(bool)
+        final = final[final_cols]
+        st.session_state["edited"] = final
+        st.write(f"승인 **{int(final['승인'].sum())}건** "
+                 f"(이 표 {int(final.loc[idx, '승인'].sum())}건 + 자동 분류 {int(final.loc[auto_mask, '승인'].sum())}건) "
+                 f"/ 전체 {len(final)}건")
+
+        # 새 분류인데 확인 체크가 빠진 승인 행, 동일 특약명인데 예측이 기존과 다른 행을 알려준다
+        models = st.session_state["models"]
+        missing = [r["특약코드"] for _, r in final[final["승인"] & ~final["새 분류 확인"]].iterrows()
+                   if is_new_class(r, models["_hierarchy"], models["_minors"])]
+        if missing:
+            st.warning(f"기준표에 없는 새 분류입니다. 맞으면 '새 분류 확인'도 체크하세요: {', '.join(missing)}")
+        diff = final[final["기존 분류 비교"] == "기존과 다름"]
+        if len(diff):
+            st.error(f"동일 특약명인데 예측이 기준표의 기존 분류와 다릅니다. 꼭 확인하세요: {', '.join(diff['특약코드'])}")
+
         with st.expander("정확도 확인 (정답지가 있을 때만)"):
             key_file = st.file_uploader("정답지 엑셀 (answer_key.xlsx)", type="xlsx", key="answer")
             if key_file:
@@ -259,79 +389,12 @@ elif page == "② 신규 특약 분류":
                 st.write("**유형별 정확도 (중분류·소분류 모두 일치 기준)**")
                 st.table(pd.Series(by_type, name="정확도").map("{:.1%}".format))
 
-# ---------- ③ 수정·승인 ----------
-elif page == "③ 수정·승인":
-    st.header("③ 수정·승인")
-    if st.session_state.get("result") is None:
-        st.warning("먼저 ② 화면에서 신규 특약을 분류해 주세요.")
-        finish()
-
-    # 표가 없거나, 열 구성이나 특약 순서가 ②의 결과와 달라졌으면 새로 만든다
-    columns = (["상태", "승인", "새 분류 확인", "특약코드", "특약명", "담보코드", "담보명"] + LEVELS
-               + ["신뢰도", "유사도", "동일한 기존 특약코드", "기존 분류 비교"])
-    result = st.session_state["result"]
-    old = st.session_state.get("edit_base")
-    if old is None or list(old.columns) != columns or list(old["특약코드"]) != list(result["특약코드"]):
-        base = result[
-            ["상태", "특약코드", "특약명", "담보코드", "담보명"] + LEVELS + ["신뢰도", "유사도", "기존_특약코드", "기존 분류 비교"]
-        ].rename(columns={"기존_특약코드": "동일한 기존 특약코드"})
-        base.insert(1, "승인", False)
-        base.insert(2, "새 분류 확인", False)
-        st.session_state["edit_base"] = base
-        st.session_state.pop("editor", None)
-
-    def set_approval(kind):
-        """승인 칸을 전체 선택 / 전체 해제 / 자동 분류만 선택한다. 고친 분류 내용은 그대로 둔다."""
-        current = st.session_state.get("edited", st.session_state["edit_base"]).copy()
-        if kind == "auto":
-            current["승인"] = current["상태"] == "자동 분류"
-        else:
-            current["승인"] = kind == "all"
-        st.session_state["edit_base"] = current
-        st.session_state.pop("editor", None)  # 표를 새 값으로 다시 그리도록 초기화
-
-    b1, b2, b3, _ = st.columns([1, 1, 1.4, 5])
-    b1.button("전체 선택", on_click=set_approval, args=("all",))
-    b2.button("전체 해제", on_click=set_approval, args=("none",))
-    b3.button("자동 분류만 선택", on_click=set_approval, args=("auto",))
-
-    base = st.session_state["edit_base"]
-    master = st.session_state["master"]
-    st.caption("중분류·소분류를 직접 고치고(대분류·상세분류는 입력값이라 고칠 수 없습니다), 확인한 행은 '승인'에 체크하세요. 승인한 행만 기준표에 반영됩니다. "
-               "새 값을 직접 입력할 수 있고, 새 값이면 '새 분류 확인'도 체크해야 반영됩니다.")
-    edited = st.data_editor(
-        base, key="editor", hide_index=True, width="stretch",
-        disabled=["특약코드", "특약명", "담보코드", "담보명", "대분류", "상세분류", "신뢰도", "유사도", "상태",
-                  "동일한 기존 특약코드", "기존 분류 비교"],
-        column_config={
-            "승인": st.column_config.CheckboxColumn("승인"),
-            "새 분류 확인": st.column_config.CheckboxColumn(
-                "새 분류 확인", help="기준표에 없는 중분류·소분류를 일부러 추가하는 경우에만 체크"),
-            "중분류": st.column_config.TextColumn("중분류 (추천·새 값 입력 가능)"),
-            "소분류": st.column_config.TextColumn("소분류 (추천·새 값 입력 가능)"),
-            "대분류": st.column_config.TextColumn("대분류 (입력·수정 불가)"),
-            "상세분류": st.column_config.TextColumn("상세분류 (입력·수정 불가)"),
-        },
-    )
-    st.session_state["edited"] = edited
-    st.write(f"승인 **{int(edited['승인'].sum())}건** / 전체 {len(edited)}건")
-
-    # 새 분류인데 확인 체크가 빠진 승인 행을 알려준다
-    models = st.session_state["models"]
-    missing = [r["특약코드"] for _, r in edited[edited["승인"] & ~edited["새 분류 확인"]].iterrows()
-               if is_new_class(r, models["_hierarchy"], models["_minors"])]
-    if missing:
-        st.warning(f"기준표에 없는 새 분류입니다. 맞으면 '새 분류 확인'도 체크하세요: {', '.join(missing)}")
-    diff = edited[(edited["기존 분류 비교"] == "기존과 다름")]
-    if len(diff):
-        st.error(f"동일 특약명인데 예측이 기준표의 기존 분류와 다릅니다. 꼭 확인하세요: {', '.join(diff['특약코드'])}")
-
-# ---------- ④ 반영·다운로드 ----------
-elif page == "④ 반영·다운로드":
-    st.header("④ 반영·다운로드")
+# ---------- ③ 반영·다운로드 ----------
+elif page == "③ 반영·다운로드":
+    st.header("③ 반영·다운로드")
     edited = st.session_state.get("edited")
     if edited is None:
-        st.warning("먼저 ③ 화면에서 분류를 확인하고 승인해 주세요.")
+        st.warning("먼저 ② 화면에서 분류를 확인하고 승인해 주세요.")
         finish()
 
     def to_excel(df, sheet):
@@ -410,9 +473,9 @@ elif page == "④ 반영·다운로드":
                 st.session_state["delete_pending"] = None
                 st.rerun()
 
-# ---------- ⑤ 손해율 집계 (선택) ----------
+# ---------- ④ 손해율 집계 (선택) ----------
 else:
-    st.header("⑤ 손해율 집계 (선택)")
+    st.header("④ 손해율 집계 (선택)")
     if st.session_state["master"] is None:
         st.warning("먼저 ① 화면에서 기준표를 올리고 학습해 주세요.")
         finish()
@@ -422,7 +485,7 @@ else:
         st.session_state["perf_df"] = pd.read_excel(file, dtype={"기준월": str, "담보코드": str})
     if st.session_state.get("perf_df") is not None:
         perf = st.session_state["perf_df"]
-        # 기준표 분류를 바탕으로, ③에서 수정한 신규 특약 분류가 있으면 그것을 우선한다
+        # 기준표 분류를 바탕으로, ②에서 수정한 신규 특약 분류가 있으면 그것을 우선한다
         table = st.session_state["master"][["담보코드", "대분류"]]
         edited = st.session_state.get("edited")
         if edited is not None:
