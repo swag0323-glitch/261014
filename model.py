@@ -1,11 +1,12 @@
 """학습과 분류 (로컬 scikit-learn만 사용). 특약 한 줄 = 한 건이고, 중분류·소분류를 예측한다."""
+import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 
 from rules import (LEVELS, PREDICT_LEVELS, INPUT_COLS, MASTER_COLS, clean_name,
-                   check_master, build_hierarchy, is_child, bigrams, name_similarity)
+                   check_master, build_hierarchy, is_child, bigrams, name_similarity, unknown_pieces)
 
 
 def read_master(path):
@@ -34,6 +35,7 @@ def train(master):
         pipe.fit(x, ok[level])
         models[level] = pipe
     models["_hierarchy"] = build_hierarchy(ok)
+    models["_details"] = set(ok["상세분류"])                                    # 기준표의 상세분류 목록
     models["_minors"] = set(ok["소분류"])                                       # 기준표의 소분류 목록
     models["_known"] = set().union(*[bigrams(clean_name(n)) for n in ok["특약명"]])   # 기준표 특약명의 글자 조각
     return models, checked
@@ -47,12 +49,27 @@ def classify(models, new_df, threshold=0.7, min_sim=0.8):
     for col in ["대분류", "상세분류"]:
         result[col] = result[col].fillna("").astype(str).str.strip()
     x = make_text(result)
-    probs = []
+    probs, top = [], {}
     for level in PREDICT_LEVELS:
-        result[level] = models[level].predict(x)
-        probs.append(models[level].predict_proba(x).max(axis=1))
+        proba = models[level].predict_proba(x)
+        order = np.argsort(-proba, axis=1)
+        classes = models[level].classes_
+        rows = np.arange(len(x))
+        result[level] = classes[order[:, 0]]
+        probs.append(proba[rows, order[:, 0]])
+        second = order[:, 1] if proba.shape[1] > 1 else order[:, 0]
+        top[level] = (classes[second], proba[rows, second])
     result["신뢰도"] = pd.DataFrame(probs).min().round(3).values
     result["유사도"] = result["특약명"].map(lambda n: name_similarity(n, models["_known"]))
+    # 신뢰도가 낮은 이유를 설명하기 위한 값: 어느 단계가 더 낮았는지, 2위 후보는 무엇이었는지
+    low_step = np.argmin(np.array(probs), axis=0)
+    result["신뢰도_단계"] = [PREDICT_LEVELS[i] for i in low_step]
+    result["신뢰도_차선"] = [top[PREDICT_LEVELS[i]][0][n] for n, i in enumerate(low_step)]
+    result["신뢰도_차선확률"] = [top[PREDICT_LEVELS[i]][1][n] for n, i in enumerate(low_step)]
+    pieces = result["특약명"].map(lambda n: unknown_pieces(n, models["_known"]))
+    result["낯선조각"] = pieces.map(lambda t: ",".join(t[0]))
+    result["조각수"] = pieces.map(lambda t: t[1])
+    result["상세분류_신규"] = (result["상세분류"] != "") & ~result["상세분류"].isin(models["_details"])
     auto = (result["신뢰도"] >= threshold) & (result["유사도"] >= min_sim)
     result["상태"] = auto.map({True: "자동 분류", False: "검토 필요"})
     # 예측한 중분류가 입력된 대분류의 하위가 아니면 계층 불일치
@@ -60,7 +77,8 @@ def classify(models, new_df, threshold=0.7, min_sim=0.8):
     result.loc[bad, "상태"] = "계층 불일치"
     # 대분류·상세분류가 비어 있는 입력은 사람이 먼저 채워야 한다
     result.loc[(result["대분류"] == "") | (result["상세분류"] == ""), "상태"] = "검토 필요"
-    return result[MASTER_COLS + ["신뢰도", "유사도", "상태"]]
+    extra = ["신뢰도_단계", "신뢰도_차선", "신뢰도_차선확률", "낯선조각", "조각수", "상세분류_신규"]
+    return result[MASTER_COLS + ["신뢰도", "유사도", "상태"] + extra]
 
 
 def accuracy(result, answer):

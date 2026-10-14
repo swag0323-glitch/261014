@@ -36,6 +36,13 @@ def name_similarity(name, known):
     return round(len(pieces & known) / len(pieces), 3) if pieces else 0.0
 
 
+def unknown_pieces(name, known):
+    """신규 특약명의 글자 조각(두 글자씩) 중 기준표에 없던 것을 순서대로 돌려준다."""
+    text = clean_name(name)
+    pieces = [text[i:i + 2] for i in range(len(text) - 1)]
+    return [p for p in dict.fromkeys(pieces) if p not in known], len(set(pieces))
+
+
 def is_new_class(row, hierarchy, minors):
     """중분류나 소분류가 기준표에 없던 값이면 '새 분류'."""
     return row["중분류"] not in hierarchy or row["소분류"] not in minors
@@ -114,10 +121,23 @@ def explain_row(r, threshold, min_sim, hierarchy):
         if r["기존 분류 비교"] == "기존과 다름":
             cols = [lv for lv in PREDICT_LEVELS if r[lv] != r["기존_" + lv]]
             out.append(("diff", cols, "예측이 기존 분류와 다름"))
-    if r["신뢰도"] < threshold:
-        out.append(("low", ["신뢰도"], f'신뢰도 {r["신뢰도"]:.2f} (기준 {threshold:g} 미만)'))
+    # 신규 보장 가능성 → 처음 보는 표현(유사도) → 신뢰도 순서로, 원인에서 결과 쪽으로 적는다
+    if r.get("상세분류_신규"):
+        out.append(("new", ["상세분류"], f"신규 보장 가능성: 기준표에 없는 상세분류 '{r['상세분류']}'"))
     if r["유사도"] < min_sim:
-        out.append(("sim", ["유사도"], f'유사도 {r["유사도"]:.2f} (기준 {min_sim:g} 미만)'))
+        n, lack = int(r.get("조각수", 0)), [t for t in str(r.get("낯선조각", "")).split(",") if t]
+        text = f'유사도 {r["유사도"]:.2f}: 글자 조각 {n}개 중 {n - len(lack)}개만 기준표에 있음'
+        if lack:
+            text += f' (처음 보는 조각: {", ".join(lack)})'
+        out.append(("sim", ["유사도"], text))
+    if r["신뢰도"] < threshold:
+        text = f'신뢰도 {r["신뢰도"]:.2f}'
+        if r.get("신뢰도_단계"):
+            step = r["신뢰도_단계"]
+            text += f": {step} '{r[step]}' 확률 {r['신뢰도']:.0%}"
+            if r.get("신뢰도_차선"):
+                text += f", 2위 '{r['신뢰도_차선']}' {r['신뢰도_차선확률']:.0%}"
+        out.append(("low", ["신뢰도"], text))
     return out
 
 
