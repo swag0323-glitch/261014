@@ -783,6 +783,9 @@ else:
 
         months = sorted(perf["기준월"].unique())
         picked = st.multiselect("기준월", months, default=months)
+        if not picked:   # 월을 모두 해제하면 합계가 0이라 손해율 0.0%로 오해할 수 있으므로 안내만 보여준다
+            st.info("월을 선택해주세요. 기준월을 하나 이상 선택하면 손해율을 집계합니다.")
+            finish()
         perf = perf[perf["기준월"].isin(picked)]
 
         df, levels = attach_class(perf, table)
