@@ -34,9 +34,33 @@ if st.session_state["models"] is None and not st.session_state.get("autoload_don
 for key, default in [("threshold", 0.7), ("min_sim", 0.8)]:
     st.session_state[key] = st.session_state.get(key, default)
 
-page = st.sidebar.radio(
-    "메뉴", ["① 기준표 업로드·학습", "② 신규 특약 분류", "③ 수정·승인", "④ 반영·다운로드", "⑤ 손해율 집계(선택)"]
-)
+PAGES = ["① 기준표 업로드·학습", "② 신규 특약 분류", "③ 수정·승인", "④ 반영·다운로드", "⑤ 손해율 집계(선택)"]
+st.session_state.setdefault("page", PAGES[0])
+
+
+def go_to(name):
+    """이전/다음 버튼을 누르면 사이드바 메뉴와 같은 값(page)을 바꿔서 화면을 이동한다."""
+    st.session_state["page"] = name
+
+
+def nav_buttons():
+    """화면 맨 아래의 이전/다음 버튼."""
+    i = PAGES.index(st.session_state["page"])
+    st.divider()
+    left, right, _ = st.columns([2, 2, 4])
+    if i > 0:
+        left.button(f"← 이전: {PAGES[i - 1]}", on_click=go_to, args=(PAGES[i - 1],), key="nav_prev")
+    if i < len(PAGES) - 1:
+        right.button(f"다음: {PAGES[i + 1]} →", on_click=go_to, args=(PAGES[i + 1],), type="primary", key="nav_next")
+
+
+def finish():
+    """안내 문구만 보이고 화면을 멈출 때도 이전/다음 버튼은 보이게 한다."""
+    nav_buttons()
+    st.stop()
+
+
+page = st.sidebar.radio("메뉴", PAGES, key="page")
 
 
 STATUS_ORDER = ["검토 필요", "계층 불일치", "동일 특약명(코드 상이)", "자동 분류"]
@@ -74,7 +98,7 @@ if page == "① 기준표 업로드·학습":
         lack = missing_columns(master, MASTER_COLS)
         if lack:
             st.error(f"기준표에 없는 열이 있습니다: {', '.join(lack)}  (필요한 열: {', '.join(MASTER_COLS)})")
-            st.stop()
+            finish()
         # 화면을 옮겨도 남도록 업로드한 기준표를 보관한다
         st.session_state.update(pending_master=master, pending_name=file.name, pending_id=file.file_id)
         st.session_state.pop("train_msg", None)
@@ -112,7 +136,7 @@ elif page == "② 신규 특약 분류":
     st.header("② 신규 특약 분류")
     if st.session_state["models"] is None:
         st.warning("먼저 ① 화면에서 기준표를 올리고 학습해 주세요.")
-        st.stop()
+        finish()
 
     file = st.file_uploader(f"신규 특약 엑셀 ({', '.join(INPUT_COLS)})", type="xlsx")
     if file and st.session_state["new_file_id"] != file.file_id:
@@ -120,7 +144,7 @@ elif page == "② 신규 특약 분류":
         lack = missing_columns(new_df, INPUT_COLS)
         if lack:
             st.error(f"신규 특약 파일에 없는 열이 있습니다: {', '.join(lack)}")
-            st.stop()
+            finish()
         st.session_state["new_df"] = new_df
         st.session_state["new_file_id"] = file.file_id
         st.session_state["new_file_name"] = file.name
@@ -173,7 +197,7 @@ elif page == "③ 수정·승인":
     st.header("③ 수정·승인")
     if st.session_state.get("result") is None:
         st.warning("먼저 ② 화면에서 신규 특약을 분류해 주세요.")
-        st.stop()
+        finish()
 
     # 표가 없거나, 열 구성이나 특약 순서가 ②의 결과와 달라졌으면 새로 만든다
     columns = (["상태", "승인", "새 분류 확인", "특약코드", "특약명", "담보코드", "담보명"] + LEVELS
@@ -239,7 +263,7 @@ elif page == "④ 반영·다운로드":
     edited = st.session_state.get("edited")
     if edited is None:
         st.warning("먼저 ③ 화면에서 분류를 확인하고 승인해 주세요.")
-        st.stop()
+        finish()
 
     def to_excel(df, sheet):
         buf = BytesIO()
@@ -322,7 +346,7 @@ else:
     st.header("⑤ 손해율 집계 (선택)")
     if st.session_state["master"] is None:
         st.warning("먼저 ① 화면에서 기준표를 올리고 학습해 주세요.")
-        st.stop()
+        finish()
 
     file = st.file_uploader("담보별 실적 엑셀 (coverage_perf.xlsx)", type="xlsx")
     if file:
@@ -346,3 +370,5 @@ else:
                      hide_index=True, width="stretch")
         st.bar_chart(out.set_index("대분류")["손해율(%)"])
         st.caption("손해율 = 대분류별 보험금 합계 ÷ 위험보험료 합계 × 100 (평균의 평균이 아닙니다)")
+
+nav_buttons()
