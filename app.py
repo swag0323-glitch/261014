@@ -47,7 +47,9 @@ def nav_buttons():
     """화면 맨 아래의 이전/다음 버튼."""
     i = PAGES.index(st.session_state["page"])
     st.divider()
-    left, right, _ = st.columns([2, 2, 4])
+    # 다음 버튼은 오른쪽 맨 끝에 붙인다
+    st.markdown("<style>.st-key-nav_next {width: 100%; display: flex; justify-content: flex-end;} .st-key-nav_next .stButton {width: fit-content;}</style>", unsafe_allow_html=True)
+    left, right = st.columns(2)
     if i > 0:
         left.button(f"← 이전: {PAGES[i - 1]}", on_click=go_to, args=(PAGES[i - 1],), key="nav_prev")
     if i < len(PAGES) - 1:
