@@ -69,3 +69,22 @@ def check_same_name(result, checked_master):
             for level in LEVELS:
                 out.at[i, "기존_" + level] = base.loc[name, level]
     return out
+
+
+def pick_approved(edited, hierarchy, master_codes):
+    """승인된 행을 기준표에 넣을 행과 건너뛸 행(사유 포함)으로 나눈다."""
+    ok, skipped = [], []
+    for _, r in edited[edited["승인"]].iterrows():
+        if any(str(r[c]).strip() == "" for c in LEVELS):
+            reason = "누락 (4단계 중 빈 칸이 있음)"
+        elif not is_child(hierarchy, r["대분류"], r["중분류"]):
+            reason = "계층 오류 (중분류가 대분류의 하위가 아님)"
+        elif r["상태"] == "동일 담보명(코드 상이)":
+            reason = "동일 담보명 (기준표에 이미 있음)"
+        elif r["담보코드"] in master_codes:
+            reason = "이미 기준표에 있는 담보코드"
+        else:
+            ok.append(r)
+            continue
+        skipped.append({**r.to_dict(), "건너뛴 사유": reason})
+    return pd.DataFrame(ok), pd.DataFrame(skipped)

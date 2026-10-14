@@ -3,18 +3,29 @@ import pandas as pd
 import streamlit as st
 
 from model import read_master, train, classify, accuracy
-from rules import LEVELS, check_master, check_same_name
+from io import BytesIO
+
+from rules import LEVELS, check_master, check_same_name, pick_approved
 
 st.set_page_config(page_title="신규 담보 자동 분류 도구", layout="wide")
 st.title("신규 담보 자동 분류 도구")
 
 # 화면이 새로고침되어도 값이 남도록 session_state에 보관한다
-for key in ["checked", "models", "new_df"]:
+for key in ["master", "checked", "models", "new_df", "new_file_id"]:
     st.session_state.setdefault(key, None)
 
 page = st.sidebar.radio(
     "메뉴", ["① 기준표 업로드·학습", "② 신규 담보 분류", "③ 수정·승인", "④ 반영·다운로드"]
 )
+
+
+STATUS_ORDER = ["검토 필요", "계층 불일치", "동일 담보명(코드 상이)", "자동 분류"]
+
+
+def sort_by_status(df):
+    """상태별로 묶어서 정렬한다. 같은 상태 안에서는 원래 순서를 유지한다."""
+    rank = df["상태"].map(lambda x: STATUS_ORDER.index(x) if x in STATUS_ORDER else len(STATUS_ORDER))
+    return df.assign(_순서=rank).sort_values("_순서", kind="stable").drop(columns="_순서").reset_index(drop=True)
 
 
 def color_review(row):
@@ -50,6 +61,7 @@ if page == "① 기준표 업로드·학습":
         if st.button("학습하기", type="primary"):
             with st.spinner("학습 중입니다..."):
                 models, checked = train(master)
+            st.session_state["master"] = master
             st.session_state["models"] = models
             st.session_state["checked"] = checked
             st.success(f"학습 완료! ({(checked['상태'] == '정상').sum()}건으로 학습했습니다)")
@@ -64,21 +76,24 @@ elif page == "② 신규 담보 분류":
         st.stop()
 
     file = st.file_uploader("신규 담보 엑셀 (담보코드, 담보명)", type="xlsx")
-    if file:
+    if file and st.session_state["new_file_id"] != file.file_id:
         st.session_state["new_df"] = pd.read_excel(file, dtype=str)
+        st.session_state["new_file_id"] = file.file_id
+        st.session_state.pop("edit_base", None)  # 새 파일이면 ③의 수정 내용 초기화
+        st.session_state.pop("editor", None)
     threshold = st.slider("신뢰도 기준 (이 값 이상이면 자동 분류)", 0.0, 1.0, 0.7, 0.05)
 
     new_df = st.session_state["new_df"]
     if new_df is not None:
         result = classify(st.session_state["models"], new_df, threshold)
-        result = check_same_name(result, st.session_state["checked"])
+        result = sort_by_status(check_same_name(result, st.session_state["checked"]))
         st.session_state["result"] = result
 
         counts = result["상태"].value_counts()
         st.write("　".join(f"**{k}** {v}건" for k, v in counts.items()))
 
         # 동일 담보명이면 그 행 바로 아래에 기준표의 기존 행(회색)을 끼워 넣는다
-        show = ["담보코드", "담보명"] + LEVELS + ["신뢰도", "상태"]
+        show = ["상태", "담보코드", "담보명"] + LEVELS + ["신뢰도"]
         rows = []
         for _, r in result.iterrows():
             rows.append(r[show])
@@ -100,6 +115,89 @@ elif page == "② 신규 담보 분류":
                 st.write("**유형별 정확도 (상세분류 기준)**")
                 st.table(pd.Series(by_type, name="정확도").map("{:.1%}".format))
 
-# ---------- ③, ④ 는 다음 단계에서 만든다 ----------
+# ---------- ③ 수정·승인 ----------
+elif page == "③ 수정·승인":
+    st.header("③ 수정·승인")
+    if st.session_state.get("result") is None:
+        st.warning("먼저 ② 화면에서 신규 담보를 분류해 주세요.")
+        st.stop()
+
+    # 표가 없거나, 열 구성이나 담보 순서가 ②의 결과와 달라졌으면 새로 만든다
+    columns = ["상태", "승인", "담보코드", "담보명"] + LEVELS + ["신뢰도", "동일한 기존 담보코드"]
+    result = st.session_state["result"]
+    old = st.session_state.get("edit_base")
+    if old is None or list(old.columns) != columns or list(old["담보코드"]) != list(result["담보코드"]):
+        base = result[
+            ["상태", "담보코드", "담보명"] + LEVELS + ["신뢰도", "기존_담보코드"]
+        ].rename(columns={"기존_담보코드": "동일한 기존 담보코드"})
+        base.insert(1, "승인", False)
+        st.session_state["edit_base"] = base
+        st.session_state.pop("editor", None)
+
+    def set_all(value):
+        """승인 칸을 전체 선택/해제한다. 이미 고친 분류 내용은 그대로 둔다."""
+        current = st.session_state.get("edited", st.session_state["edit_base"]).copy()
+        current["승인"] = value
+        st.session_state["edit_base"] = current
+        st.session_state.pop("editor", None)  # 표를 새 값으로 다시 그리도록 초기화
+
+    b1, b2, _ = st.columns([1, 1, 6])
+    b1.button("전체 선택", on_click=set_all, args=(True,))
+    b2.button("전체 해제", on_click=set_all, args=(False,))
+
+    base = st.session_state["edit_base"]
+    master = st.session_state["master"]
+    options = lambda col: sorted(master[col].dropna().unique())
+    st.caption("분류 칸을 직접 고치고, 확인한 행은 '승인'에 체크하세요. 승인한 행만 기준표에 반영됩니다.")
+    edited = st.data_editor(
+        base, key="editor", hide_index=True, width="stretch",
+        disabled=["담보코드", "담보명", "신뢰도", "상태", "동일한 기존 담보코드"],
+        column_config={
+            "승인": st.column_config.CheckboxColumn("승인"),
+            "대분류": st.column_config.SelectboxColumn("대분류", options=options("대분류")),
+            "중분류": st.column_config.SelectboxColumn("중분류", options=options("중분류")),
+            "소분류": st.column_config.SelectboxColumn("소분류", options=options("소분류")),
+            "상세분류": st.column_config.TextColumn("상세분류 (새 값 직접 입력 가능)"),
+        },
+    )
+    st.session_state["edited"] = edited
+    st.write(f"승인 **{int(edited['승인'].sum())}건** / 전체 {len(edited)}건")
+
+# ---------- ④ 반영·다운로드 ----------
 else:
-    st.info("이 화면은 4단계에서 만듭니다.")
+    st.header("④ 반영·다운로드")
+    edited = st.session_state.get("edited")
+    if edited is None:
+        st.warning("먼저 ③ 화면에서 분류를 확인하고 승인해 주세요.")
+        st.stop()
+
+    models, master = st.session_state["models"], st.session_state["master"]
+    ok, skipped = pick_approved(edited, models["_hierarchy"], set(master["담보코드"]))
+    st.write(f"승인 {int(edited['승인'].sum())}건 중 **반영 가능 {len(ok)}건**, 건너뜀 {len(skipped)}건")
+    if len(skipped):
+        st.warning("아래 행은 반영되지 않습니다.")
+        st.dataframe(skipped[["담보코드", "담보명"] + LEVELS + ["건너뛴 사유"]],
+                     hide_index=True, width="stretch")
+
+    if st.button("승인분 기준표 반영 + 재학습", type="primary", disabled=len(ok) == 0):
+        added = ok[["담보코드", "담보명"] + LEVELS]
+        new_master = pd.concat([master, added], ignore_index=True)
+        with st.spinner("재학습 중입니다..."):
+            models, checked = train(new_master)
+        st.session_state["master"] = new_master
+        st.session_state["models"] = models
+        st.session_state["checked"] = checked
+        st.success(f"{len(added)}건을 기준표에 반영하고 재학습했습니다. "
+                   f"(기준표 {len(new_master)}건, 학습 {(checked['상태'] == '정상').sum()}건)")
+
+    def to_excel(df, sheet):
+        buf = BytesIO()
+        df.to_excel(buf, index=False, sheet_name=sheet)
+        return buf.getvalue()
+
+    st.subheader("엑셀 다운로드")
+    c1, c2 = st.columns(2)
+    c1.download_button("분류 결과 (승인 여부 포함)", to_excel(edited, "분류결과"),
+                       file_name="classification_result.xlsx")
+    c2.download_button("갱신된 기준표", to_excel(st.session_state["master"], "기준표"),
+                       file_name="coverage_master_updated.xlsx")
