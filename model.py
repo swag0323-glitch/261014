@@ -4,7 +4,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 
-from rules import LEVELS, clean_name, check_master, build_hierarchy, is_child
+from rules import (LEVELS, clean_name, check_master, build_hierarchy, is_child,
+                   bigrams, name_similarity)
 
 
 def read_master(path):
@@ -27,17 +28,22 @@ def train(master):
         pipe.fit(x, ok[level])
         models[level] = pipe
     models["_hierarchy"] = build_hierarchy(ok)
+    models["_minors"] = set(ok["소분류"])                               # 기준표의 소분류 목록
+    models["_known"] = set().union(*[bigrams(t) for t in x])           # 기준표 담보명의 글자 조각
     return models, checked
 
 
-def classify(models, new_df, threshold=0.7):
-    """신규 담보를 분류한다. 신뢰도 = 상세분류 예측 확률의 최댓값."""
+def classify(models, new_df, threshold=0.7, min_sim=0.8):
+    """신규 담보를 분류한다. 신뢰도 = 상세분류 예측 확률의 최댓값.
+    신뢰도가 높아도 기준표에 없던 표현이 많으면(유사도가 낮으면) 검토 필요로 본다."""
     result = new_df[["담보코드", "담보명"]].copy()
     x = result["담보명"].map(clean_name)
     for level in LEVELS:
         result[level] = models[level].predict(x)
     result["신뢰도"] = models["상세분류"].predict_proba(x).max(axis=1).round(3)
-    result["상태"] = result["신뢰도"].map(lambda p: "자동 분류" if p >= threshold else "검토 필요")
+    result["유사도"] = result["담보명"].map(lambda n: name_similarity(n, models["_known"]))
+    auto = (result["신뢰도"] >= threshold) & (result["유사도"] >= min_sim)
+    result["상태"] = auto.map({True: "자동 분류", False: "검토 필요"})
     # 예측한 중분류가 예측한 대분류의 하위가 아니면 계층 불일치
     bad = ~result.apply(lambda r: is_child(models["_hierarchy"], r["대분류"], r["중분류"]), axis=1)
     result.loc[bad, "상태"] = "계층 불일치"
