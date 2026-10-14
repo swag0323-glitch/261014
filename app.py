@@ -20,11 +20,15 @@ if st.session_state["models"] is None and not st.session_state.get("autoload_don
     st.session_state["autoload_done"] = True
     latest = history.latest_master_path()
     if latest is not None:
-        with st.spinner("최근 반영 버전을 불러오는 중입니다..."):
-            master = read_master(latest)
-            models, checked = train(master)
-        st.session_state.update(master=master, models=models, checked=checked,
-                                loaded_from=latest.parent.name)
+        master = read_master(latest)
+        if missing_columns(master, MASTER_COLS):
+            # 예전 구조(특약명 열 없음)로 저장된 이력은 불러오지 않는다
+            st.session_state["old_history"] = latest.parent.name
+        else:
+            with st.spinner("최근 반영 버전을 불러오는 중입니다..."):
+                models, checked = train(master)
+            st.session_state.update(master=master, models=models, checked=checked,
+                                    loaded_from=latest.parent.name)
 
 page = st.sidebar.radio(
     "메뉴", ["① 기준표 업로드·학습", "② 신규 특약 분류", "③ 수정·승인", "④ 반영·다운로드", "⑤ 손해율 집계(선택)"]
@@ -57,6 +61,9 @@ if page == "① 기준표 업로드·학습":
     if st.session_state.get("loaded_from"):
         st.info(f"최근 반영 버전({st.session_state['loaded_from']})을 자동으로 불러와 학습했습니다. "
                 "새 기준표로 바꾸려면 아래에서 업로드하세요.")
+    if st.session_state.get("old_history"):
+        st.warning(f"이력 폴더의 최근 버전({st.session_state['old_history']})은 예전 열 구성이라 자동으로 불러오지 않았습니다. "
+                   "아래에서 새 기준표를 업로드하세요.")
     file = st.file_uploader("기준표 엑셀 (coverage_master.xlsx, 첫 번째 시트 사용)", type="xlsx")
     if file:
         master = read_master(file)
