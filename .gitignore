@@ -2,3 +2,6 @@
 .DS_Store
 __pycache__/
 history/
+
+# 엑셀 임시 잠금 파일
+~$*
