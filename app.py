@@ -8,8 +8,8 @@ from pathlib import Path
 from io import BytesIO
 
 import history
-from model import read_master, train, classify, accuracy
-from rules import (LEVELS, INPUT_COLS, MASTER_COLS, missing_columns, check_master, check_same_name, pick_approved, is_new_class, loss_ratio_by_major, explain_row)
+from model import read_master, train, classify, accuracy, low_confidence_split
+from rules import (LEVELS, INPUT_COLS, MASTER_COLS, missing_columns, check_master, check_same_name, pick_approved, is_new_class, attach_class, sum_ratio, explain_row)
 
 st.set_page_config(page_title="신규 담보(특약) 자동 분류 도구", layout="wide")
 st.title("신규 담보(특약) 자동 분류 도구")
@@ -81,8 +81,8 @@ def load_sample_answer():
 
 
 def load_sample_perf():
-    st.session_state["perf_df"] = pd.read_excel(SAMPLE_DIR / "coverage_perf.xlsx", dtype={"기준월": str, "담보코드": str})
-    st.session_state["perf_name"] = "샘플 coverage_perf.xlsx" + SAMPLE_LABEL
+    st.session_state["perf_df"] = pd.read_excel(SAMPLE_DIR / "coverage_perf_special.xlsx", dtype={"기준월": str, "특약코드": str})
+    st.session_state["perf_name"] = "샘플 coverage_perf_special.xlsx" + SAMPLE_LABEL
 
 
 def quick_start():
@@ -239,6 +239,58 @@ def html_result_table(result, threshold, min_sim, hierarchy):
     width = sum(w for _, w, _ in RESULT_COLS)
     return (RESULT_CSS + f'<div class="rt-wrap"><table class="rt" style="width:{width}px"><colgroup>{cg}</colgroup>'
             f'<thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>')
+
+
+# 손해율 계층 표(HTML): 줄을 누르면 한 단계 아래로 펼쳐진다 (대 > 중 > 소 > 상세)
+LOSS_CSS = """
+<style>
+.lt{border:1px solid rgba(128,128,128,.35);border-radius:8px;max-height:560px;overflow:auto}
+.lt .hd,.lt .tr{display:grid;grid-template-columns:minmax(200px,2.2fr) minmax(90px,1fr) 110px 110px 70px;gap:10px;align-items:center;font-size:13px}
+.lt .hd{position:sticky;top:0;z-index:1;background:#f0f2f6;color:#555;padding:6px 10px;border-bottom:1px solid rgba(128,128,128,.35)}
+.lt .hd span:nth-child(n+3){text-align:right}
+.lt .tr{padding:7px 10px;border-bottom:1px solid rgba(128,128,128,.25)}
+.lt .nm{display:flex;gap:8px;align-items:center;min-width:0;overflow-wrap:anywhere;padding-left:var(--ind)}
+.lt .tag{font-size:10.5px;color:#3a45a8;background:#eef0fc;border:1px solid #9aa4e6;border-radius:4px;padding:0 5px;white-space:nowrap}
+.lt .n{text-align:right;font-variant-numeric:tabular-nums} .lt .r{font-weight:700}
+.lt .bar{display:block;height:8px;background:rgba(128,128,128,.2);border-radius:4px;overflow:hidden} .lt .bar i{display:block;height:100%}
+.lt .lv0{font-weight:700;background:rgba(128,128,128,.12)} .lt .lv1{font-weight:500}
+.lt details>summary{list-style:none;cursor:pointer} .lt details>summary::-webkit-details-marker{display:none}
+.lt details>summary .nm:before{content:"▸";color:#888;font-size:11px;width:10px} .lt details[open]>summary .nm:before{content:"▾"}
+.lt .leaf .nm:before{content:"";width:10px}
+</style>
+"""
+
+
+def html_loss_tree(df, levels, open_all=False):
+    """분류 단계별 합계 표를 접었다 펼 수 있는 HTML로 만든다. 손해율은 각 줄의 합계로 계산한다."""
+    tags = ["대", "중", "소", "상세"]
+
+    def line(name, prem, loss, lvl, leaf):
+        rate = loss / prem * 100 if prem > 0 else 0
+        color = "#a4161a" if rate >= 80 else "#8a5300" if rate >= 60 else "#17693a"
+        width = min(rate, 150) / 150 * 100
+        return (f'<div class="tr lv{lvl}{" leaf" if leaf else ""}" style="--ind:{lvl * 22}px">'
+                f'<span class="nm"><span class="tag">{tags[lvl]}</span>{escape(str(name))}</span>'
+                f'<span class="bar"><i style="width:{width:.0f}%;background:{color}"></i></span>'
+                f'<span class="n">{prem:,.0f}</span><span class="n">{loss:,.0f}</span>'
+                f'<span class="n r" style="color:{color}">{rate:.1f}%</span></div>')
+
+    def build(sub, lvl, first_path):
+        out = ""
+        g = sub.groupby(levels[lvl], sort=False)[["위험보험료", "보험금"]].sum().reset_index()
+        g = g.sort_values("위험보험료", ascending=False)
+        for i, (_, r) in enumerate(g.iterrows()):
+            name = r[levels[lvl]]
+            if lvl == len(levels) - 1:
+                out += line(name, r["위험보험료"], r["보험금"], lvl, True)
+                continue
+            keep_open = open_all or (i == 0 and lvl < 2 and first_path)     # 처음에는 가장 큰 대분류와 그 첫 중분류만 펼침
+            out += (f'<details{" open" if keep_open else ""}><summary>{line(name, r["위험보험료"], r["보험금"], lvl, False)}</summary>'
+                    f'{build(sub[sub[levels[lvl]] == name], lvl + 1, first_path and i == 0)}</details>')
+        return out
+
+    head = '<div class="hd"><span>분류</span><span>손해율 막대</span><span>위험보험료</span><span>보험금</span><span>손해율</span></div>'
+    return LOSS_CSS + f'<div class="lt">{head}{build(df, 0, True)}</div>'
 
 
 # ---------- ① 기존 특약분류표 업로드·학습 ----------
@@ -487,10 +539,23 @@ elif page == "② 분류·수정·승인":
             if key_file:
                 st.session_state["answer_df"] = pd.read_excel(key_file, dtype=str)
             if st.session_state.get("answer_df") is not None:
-                per_level, by_type = accuracy(result, st.session_state["answer_df"])
-                st.write("**단계별 정확도**")
-                st.table(pd.Series(per_level, name="정확도").map("{:.1%}".format))
-                st.write("**유형별 정확도 (중분류·소분류 모두 일치 기준)**")
+                answer = st.session_state["answer_df"]
+                per_level, by_type, per_excl = accuracy(result, answer)
+                targets = {"대분류": 1.0, "중분류": 0.9, "소분류": 0.9, "상세분류": 0.8}   # PRD 성공 기준
+                rows = []
+                for lv, v in per_level.items():
+                    rows.append({"단계": lv, "정확도": f"{v:.1%}",
+                                 "신규 보장 제외": f"{per_excl[lv]:.1%}" if lv in per_excl else "",
+                                 "목표": f"{targets[lv]:.0%} 이상",
+                                 "판정": "✓ 충족" if v >= targets[lv] - 1e-9 else "✗ 미충족",
+                                 "비고": "입력값 그대로 (예측 대상 아님)" if lv in ("대분류", "상세분류") else "모델 예측"})
+                st.markdown("**단계별 정확도 (정답지와 비교)**")
+                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+                n_new, n_low = low_confidence_split(result, answer, threshold)
+                if n_new:
+                    st.markdown(f"**신규 보장 분리:** 기존 특약분류표에 없는 신규 보장 {n_new}건 중 **{n_low}건**이 "
+                                f"신뢰도 {threshold:.1f} 미만(검토 필요)으로 분리되었습니다.")
+                st.markdown("**유형별 정확도 (중분류·소분류 모두 일치 기준)**")
                 st.table(pd.Series(by_type, name="정확도").map("{:.1%}".format))
 
 # ---------- ③ 반영·다운로드 ----------
@@ -633,32 +698,47 @@ else:
         st.button("샘플로 한 번에 시작" + SAMPLE_LABEL, on_click=quick_start, type="primary", key="quick_start_4")
         finish()
 
-    file = st.file_uploader("담보별 실적 엑셀 (coverage_perf.xlsx)", type="xlsx")
+    file = st.file_uploader("실적 엑셀 (기준월, 특약코드 또는 담보코드, 위험보험료, 보험금)", type="xlsx")
     sample_or()
     st.button("샘플 실적 불러오기" + SAMPLE_LABEL, on_click=load_sample_perf, key="sample_perf",
-              help="저장소의 sample_data/coverage_perf.xlsx를 불러옵니다.")
+              help="저장소의 sample_data/coverage_perf_special.xlsx(특약코드 단위)를 불러옵니다.")
     if file:
-        st.session_state["perf_df"] = pd.read_excel(file, dtype={"기준월": str, "담보코드": str})
+        st.session_state["perf_df"] = pd.read_excel(file, dtype={"기준월": str, "특약코드": str, "담보코드": str})
         st.session_state["perf_name"] = file.name
     if st.session_state.get("perf_df") is not None:
         perf = st.session_state["perf_df"]
         st.caption(f"실적 파일: {st.session_state.get('perf_name', '')}")
-        # 기존 특약분류표 분류를 바탕으로, ②에서 수정한 신규 특약 분류가 있으면 그것을 우선한다
-        table = st.session_state["master"][["담보코드", "대분류"]]
+        lack = missing_columns(perf, ["기준월", "위험보험료", "보험금"])
+        if lack or not ({"특약코드", "담보코드"} & set(perf.columns)):
+            st.error("실적 파일에 필요한 열이 없습니다: 기준월, 특약코드(또는 담보코드), 위험보험료, 보험금")
+            finish()
+
+        # 분류는 기존 특약분류표를 바탕으로 하고, ②에서 수정한 신규 특약 분류가 있으면 그것을 우선한다
+        table = st.session_state["master"][["특약코드", "담보코드"] + LEVELS]
         edited = st.session_state.get("edited")
         if edited is not None:
-            table = pd.concat([table, edited[["담보코드", "대분류"]]], ignore_index=True)
+            table = pd.concat([table, edited[["특약코드", "담보코드"] + LEVELS]], ignore_index=True)
 
         months = sorted(perf["기준월"].unique())
         picked = st.multiselect("기준월", months, default=months)
         perf = perf[perf["기준월"].isin(picked)]
 
-        out = loss_ratio_by_major(perf, table)
-        total = out["보험금"].sum() / out["위험보험료"].sum() * 100 if out["위험보험료"].sum() else 0
-        st.metric("전체 손해율", f"{total:.1f}%")
-        st.dataframe(out.style.format({"위험보험료": "{:,.0f}", "보험금": "{:,.0f}", "손해율(%)": "{:.1f}"}),
-                     hide_index=True, width="stretch")
-        st.bar_chart(out.set_index("대분류")["손해율(%)"])
-        st.caption("손해율 = 대분류별 보험금 합계 ÷ 위험보험료 합계 × 100 (평균의 평균이 아닙니다)")
+        df, levels = attach_class(perf, table)
+        by_major = sum_ratio(df, ["대분류"])
+        total = df["보험금"].sum() / df["위험보험료"].sum() * 100 if df["위험보험료"].sum() else 0
+        c1, c2, c3 = st.columns(3)
+        c1.metric("전체 손해율", f"{total:.1f}%")
+        c2.metric("위험보험료", f"{df['위험보험료'].sum():,.0f}")
+        c3.metric("보험금", f"{df['보험금'].sum():,.0f}")
+        st.bar_chart(by_major.set_index("대분류")["손해율(%)"])
+
+        st.subheader("분류 계층별 손해율 (대분류 > 중분류 > 소분류 > 상세분류)")
+        if len(levels) < 4:
+            st.info("이 실적은 담보코드 단위라 대분류·중분류까지만 보여줍니다. "
+                    "소분류·상세분류까지 보려면 특약코드 단위 실적을 올려 주세요.")
+        st.checkbox("모두 펼치기", key="open_all")
+        st.html(html_loss_tree(df, levels, st.session_state.get("open_all", False)))
+        st.caption("줄을 누르면 한 단계 아래로 펼쳐집니다. 손해율 = 그 줄의 보험금 합계 ÷ 위험보험료 합계 × 100 "
+                   "(아래 단계 손해율의 평균이 아닙니다)")
 
 nav_buttons()
